@@ -1,0 +1,49 @@
+# Source files
+src/
+tests/
+*.test.ts
+*.spec.ts
+
+# Configuration files
+tsconfig.json
+tsconfig.*.json
+.eslintrc*
+.prettierrc*
+.editorconfig
+
+# Development files
+.gitignore
+.gitattributes
+
+# Documentation (keep README.md, CHANGELOG.md, LICENSE)
+docs/
+examples/
+
+# CI/CD
+.github/
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env*
+
+# Session files
+*.session
+session.json
+appstate.json
+
+# Build tools
+*.config.js
+*.config.ts
+rollup.config.*
+vite.config.*
+webpack.config.*
+
+# Misc
+.DS_Store
+Thumbs.db
+.cache/

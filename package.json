@@ -1,0 +1,60 @@
+{
+  "name": "panindigan",
+  "version": "1.0.6",
+  "description": "A Fully-Featured Unofficial Facebook Messenger Chat API Library for TypeScript with MQTT implementation",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "facebook",
+    "messenger",
+    "chat",
+    "api",
+    "mqtt",
+    "typescript",
+    "fca",
+    "messenger-api",
+    "facebook-chat",
+    "websocket",
+    "real-time"
+  ],
+  "author": "Panindigan Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nazzelofficial/panindigan.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nazzelofficial/panindigan/issues"
+  },
+  "homepage": "https://github.com/nazzelofficial/panindigan#readme",
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "ws": "^8.18.0",
+    "form-data": "^4.0.1",
+    "tough-cookie": "^5.0.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "@types/tough-cookie": "^4.0.5",
+    "@types/uuid": "^10.0.0"
+  }
+}
