@@ -5,6 +5,128 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-07-02
+
+### Changed
+
+#### API Layer (`src/api/`)
+- **Advanced Retry Mechanism** (`RequestHandler`)
+  - Implemented exponential backoff retry strategy (2x multiplier)
+  - Automatic retry for network errors, timeouts, and 5xx HTTP errors
+  - Configurable max retries (default: 3) and retry delay (default: 1000ms)
+  - Better error recovery and resilience against temporary failures
+  - Detailed retry logging for debugging
+
+- **GraphQL Batch Query Optimization** (`GraphQLClient`)
+  - Automatic batch splitting for large queries (max 50 queries per batch)
+  - Parallel execution of split batches for improved performance
+  - Enhanced error handling per query in batch
+  - Optimized __comet_req parameter for better Facebook compatibility
+  - Improved response parsing with null safety
+
+#### Logging System (`src/utils/Logger.ts`)
+- **Performance Metrics Tracking**
+  - Automatic tracking of API call durations and counts
+  - Average response time calculation per endpoint
+  - Last response time tracking
+  - Metrics logging and reset capabilities
+  - Better performance monitoring and debugging
+
+## [1.0.8] - 2026-07-02
+
+### Added
+
+#### Security Features (`src/security/`)
+- **Anti-Suspension System** (`AntiSuspension`)
+  - Human-behavior simulation to avoid Facebook bans
+  - Configurable delays for messages, typing, and actions
+  - Random typing pattern simulation
+  - Rate limit monitoring (30 messages/minute, 60 actions/minute)
+  - Session statistics tracking
+  - Enable/disable functionality
+  - Helps prevent account suspension by mimicking human behavior
+
+#### MQTT Enhancements (`src/mqtt/`)
+- **Fast MQTT Client** (`FastMQTT`)
+  - Optimized connection with auto-restart capability
+  - Health check system with 30-second intervals
+  - Automatic stale connection detection and reconnection
+  - Exponential backoff reconnection strategy (1.5x multiplier)
+  - Infinite reconnection attempts by default
+  - WebSocket ping/pong handling for connection monitoring
+  - Connection statistics tracking
+  - Configurable health check and timeout settings
+  - Improved stability for long-running bots
+
+#### Multi-Account Support (`src/core/`)
+- **Multi-Account Manager** (`MultiAccountManager`)
+  - Run multiple Facebook accounts simultaneously
+  - Add/remove accounts with individual configurations
+  - Default account selection for operations
+  - Broadcast messages to all connected accounts
+  - Execute functions on all accounts
+  - Account connection/disconnection management
+  - Event forwarding from all accounts to manager
+  - Statistics tracking for all accounts
+  - Batch operations support
+
+#### Authentication Enhancements (`src/auth/`)
+- **Auto Token Refresh** (`SessionManager.refreshSession()`)
+  - Automatic fb_dtsg token refresh from Facebook homepage
+  - Automatic iris sequence ID extraction
+  - Token refresh during session refresh cycle
+  - Graceful fallback if token refresh fails
+  - Prevents session expiry due to stale tokens
+  - Improved session longevity
+
+#### Configuration (`src/utils/`)
+- **Anti-Suspension Settings** (`ANTI_SUSPENSION_SETTINGS`)
+  - Typing delay range (500-3000ms)
+  - Message delay range (1000-5000ms)
+  - Action delay range (200-1000ms)
+  - Rate limits (30 messages/minute, 60 actions/minute)
+
+- **Fast MQTT Settings** (`FAST_MQTT_SETTINGS`)
+  - Keep-alive interval (60 seconds)
+  - Health check interval (30 seconds)
+  - Connection timeout (60 seconds)
+  - Max reconnect delay (60 seconds)
+  - Stale connection threshold (5 minutes)
+
+### Changed
+
+#### MQTT Connection (`src/mqtt/MQTTClient.ts`)
+- **Fixed User ID Truncation in Broker URL**
+  - Changed from URLSearchParams to manual URL parameter building
+  - Prevents user ID truncation (was `6155938173049` instead of `61559381730491`)
+  - Uses encodeURIComponent for proper encoding
+  - Fixes MQTT connection timeout issues
+  - Resolves WebSocket state CLOSED errors
+
+#### Reconnection Strategy (`src/utils/Constants.ts`)
+- **Infinite Reconnection Attempts**
+  - Changed max reconnect attempts from 10 to Infinity
+  - Initial delay increased to 3000ms (from 1000ms)
+  - Backoff multiplier changed to 1.5 (from 2.0)
+  - Max delay set to 60000ms (from 30000ms)
+  - Better recovery from network issues
+
+#### Session Refresh (`src/utils/Constants.ts`)
+- **Optimized Refresh Intervals**
+  - Session refresh interval reduced to 15 minutes (from 30 minutes)
+  - Validity check interval reduced to 3 minutes (from 5 minutes)
+  - More frequent token updates for better stability
+
+### Fixed
+
+#### MQTT Connection Timeout (`src/mqtt/MQTTClient.ts`)
+- **Critical Bug: User ID Truncation**
+  - URLSearchParams was truncating long user IDs
+  - Manual URL building with encodeURIComponent fixes the issue
+  - Facebook now receives complete user ID for authentication
+  - Resolves "MQTT connection timeout" errors
+  - WebSocket now successfully connects to broker
+
 ## [1.0.7] - 2026-07-01
 
 ### Fixed

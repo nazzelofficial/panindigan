@@ -154,10 +154,10 @@ export class SessionManager {
   }
 
   /**
-   * Refresh the session
+   * Refresh the session with automatic token extraction
    */
   async refreshSession(): Promise<boolean> {
-    logger.info('Refreshing session');
+    logger.info('Refreshing session with auto token refresh');
 
     if (!this.session) {
       logger.error('Cannot refresh: no active session');
@@ -182,6 +182,35 @@ export class SessionManager {
         path: c.path || '/',
       }));
       this.session.lastActive = new Date();
+
+      // Auto-refresh fb_dtsg token by fetching Facebook homepage
+      try {
+        const response = await fetch('https://www.facebook.com', {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        });
+
+        if (response.ok) {
+          const html = await response.text();
+          const fbDtsgMatch = html.match(/"DTSGInitialData",\s*\[\],\s*{"token":"([^"]+)"/);
+          if (fbDtsgMatch && fbDtsgMatch[1]) {
+            this.session.fbDtsg = fbDtsgMatch[1];
+            logger.info('Auto-refreshed fb_dtsg token');
+          }
+
+          // Extract iris sequence ID if available
+          const irisMatch = html.match(/"irisSeqId":"(\d+)"/);
+          if (irisMatch && irisMatch[1]) {
+            this.session.irisSeqId = irisMatch[1];
+            logger.info('Auto-refreshed iris sequence ID');
+          }
+        }
+      } catch (tokenError) {
+        logger.warn('Failed to auto-refresh tokens, continuing with existing tokens', tokenError);
+      }
 
       // Save if path is set
       if (this.sessionPath) {

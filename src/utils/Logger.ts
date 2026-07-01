@@ -8,6 +8,7 @@ export class Logger {
   private static instance: Logger;
   private logLevel: LogLevel = 'info';
   private prefix: string = '[Panindigan]';
+  private metrics: Map<string, { count: number; totalTime: number; lastTime: number }> = new Map();
 
   private readonly logLevels: Record<LogLevel, number> = {
     silent: 0,
@@ -107,6 +108,7 @@ export class Logger {
   logAPICall(endpoint: string, method: string, duration: number, success: boolean): void {
     if (!this.shouldLog('verbose')) return;
     this.verbose(`API ${method} ${endpoint}`, { duration: `${duration}ms`, success });
+    this.trackMetric(`api_${method.toLowerCase()}`, duration);
   }
 
   logMQTT(action: string, data?: unknown): void {
@@ -122,6 +124,47 @@ export class Logger {
     } else {
       this.info(message);
     }
+  }
+
+  /**
+   * Track performance metrics
+   */
+  trackMetric(name: string, duration: number): void {
+    const existing = this.metrics.get(name) || { count: 0, totalTime: 0, lastTime: 0 };
+    existing.count++;
+    existing.totalTime += duration;
+    existing.lastTime = duration;
+    this.metrics.set(name, existing);
+  }
+
+  /**
+   * Get performance metrics
+   */
+  getMetrics(): Record<string, { count: number; avgTime: number; lastTime: number }> {
+    const result: Record<string, { count: number; avgTime: number; lastTime: number }> = {};
+    for (const [name, data] of this.metrics.entries()) {
+      result[name] = {
+        count: data.count,
+        avgTime: data.totalTime / data.count,
+        lastTime: data.lastTime,
+      };
+    }
+    return result;
+  }
+
+  /**
+   * Log performance metrics
+   */
+  logMetrics(): void {
+    const metrics = this.getMetrics();
+    this.info('Performance Metrics:', metrics);
+  }
+
+  /**
+   * Reset metrics
+   */
+  resetMetrics(): void {
+    this.metrics.clear();
   }
 }
 

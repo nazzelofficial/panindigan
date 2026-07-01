@@ -1,5 +1,6 @@
 /**
  * HTTP Request Handler for Panindigan
+ * Advanced retry mechanism with exponential backoff
  */
 
 import type { CookieJar } from 'tough-cookie';
@@ -10,8 +11,9 @@ import type { RequestOptions, APIError } from '../types/index.js';
 export class RequestHandler {
   private cookieJar: CookieJar;
   private userAgent: string;
-  // Proxy support reserved for future implementation
   private defaultTimeout: number = 30000;
+  private maxRetries: number = 3;
+  private retryDelay: number = 1000;
 
   constructor(cookieJar: CookieJar, userAgent: string, _proxy?: string) {
     this.cookieJar = cookieJar;
@@ -34,9 +36,47 @@ export class RequestHandler {
   }
 
   /**
-   * Make an HTTP request
+   * Make an HTTP request with retry logic
    */
   private async request(
+    method: string,
+    url: string,
+    body: unknown,
+    options: RequestOptions
+  ): Promise<Response> {
+    const maxRetries = this.maxRetries;
+    const retryDelay = this.retryDelay;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.executeRequest(method, url, body, options);
+      } catch (error) {
+        lastError = error;
+        
+        const apiError = error as APIError;
+        if (!apiError.retryable || attempt === maxRetries) {
+          throw error;
+        }
+
+        const delay = retryDelay * Math.pow(2, attempt);
+        logger.warn(`Request failed, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`, {
+          url,
+          method,
+          error: apiError.message,
+        });
+
+        await this.sleep(delay);
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Execute a single request
+   */
+  private async executeRequest(
     method: string,
     url: string,
     body: unknown,
@@ -45,81 +85,73 @@ export class RequestHandler {
     const startTime = Date.now();
     const timeout = options.timeout || this.defaultTimeout;
 
-    try {
-      // Get cookies for this URL
-      const cookies = await this.cookieJar.getCookies(url);
-      const cookieHeader = cookies.map((c) => `${c.key}=${c.value}`).join('; ');
+    // Get cookies for this URL
+    const cookies = await this.cookieJar.getCookies(url);
+    const cookieHeader = cookies.map((c) => `${c.key}=${c.value}`).join('; ');
 
-      // Build headers
-      const headers: Record<string, string> = {
-        ...DEFAULT_HEADERS,
-        'User-Agent': this.userAgent,
-        'Cookie': cookieHeader,
-        ...options.headers,
-      };
+    // Build headers
+    const headers: Record<string, string> = {
+      ...DEFAULT_HEADERS,
+      'User-Agent': this.userAgent,
+      'Cookie': cookieHeader,
+      ...options.headers,
+    };
 
-      // Build request body
-      let requestBody: string | Buffer | FormData | undefined;
-      if (body) {
-        if (body instanceof FormData) {
-          requestBody = body;
-          // Let browser set Content-Type with boundary for FormData
-          delete headers['Content-Type'];
-        } else if (typeof body === 'string') {
-          requestBody = body;
-        } else if (Buffer.isBuffer(body)) {
-          requestBody = body;
-        } else {
-          requestBody = JSON.stringify(body);
-          headers['Content-Type'] = 'application/json';
-        }
+    // Build request body
+    let requestBody: string | Buffer | FormData | undefined;
+    if (body) {
+      if (body instanceof FormData) {
+        requestBody = body;
+        delete headers['Content-Type'];
+      } else if (typeof body === 'string') {
+        requestBody = body;
+      } else if (Buffer.isBuffer(body)) {
+        requestBody = body;
+      } else {
+        requestBody = JSON.stringify(body);
+        headers['Content-Type'] = 'application/json';
       }
+    }
 
-      // Create abort controller for timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
+    // Create abort controller for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-      // Make request
-      const response = await fetch(url, {
-        method,
-        headers,
-        body: requestBody,
-        signal: controller.signal,
-      });
+    // Make request
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: requestBody,
+      signal: controller.signal,
+    });
 
-      clearTimeout(timeoutId);
+    clearTimeout(timeoutId);
 
-      // Store cookies from response
-      const setCookieHeader = response.headers.get('set-cookie');
-      if (setCookieHeader) {
-        const cookieStrings = Array.isArray(setCookieHeader) 
-          ? setCookieHeader 
-          : [setCookieHeader];
-        for (const cookieStr of cookieStrings) {
-          await this.cookieJar.setCookie(cookieStr, url);
-        }
+    // Store cookies from response
+    const setCookieHeader = response.headers.get('set-cookie');
+    if (setCookieHeader) {
+      const cookieStrings = Array.isArray(setCookieHeader) 
+        ? setCookieHeader 
+        : [setCookieHeader];
+      for (const cookieStr of cookieStrings) {
+        await this.cookieJar.setCookie(cookieStr, url);
       }
+    }
 
-      // Log API call
-      const duration = Date.now() - startTime;
-      logger.logAPICall(url, method, duration, response.ok);
+    // Log API call
+    const duration = Date.now() - startTime;
+    logger.logAPICall(url, method, duration, response.ok);
 
-      return response;
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      logger.logAPICall(url, method, duration, false);
-
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw this.createError(ERROR_CODES.TIMEOUT_ERROR, `Request timeout after ${timeout}ms`, 408);
-      }
-
+    // Check for HTTP errors
+    if (!response.ok) {
       throw this.createError(
-        ERROR_CODES.NETWORK_ERROR,
-        `Network error: ${error instanceof Error ? error.message : String(error)}`,
-        0,
-        error
+        ERROR_CODES.API_ERROR,
+        `HTTP ${response.status}: ${response.statusText}`,
+        response.status
       );
     }
+
+    return response;
   }
 
   /**
@@ -168,9 +200,16 @@ export class RequestHandler {
     if (code === ERROR_CODES.NETWORK_ERROR || code === ERROR_CODES.TIMEOUT_ERROR) {
       return true;
     }
-    if (statusCode >= 500 && statusCode < 600) {
+    if (code === ERROR_CODES.API_ERROR && statusCode >= 500 && statusCode < 600) {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Sleep helper
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }

@@ -127,9 +127,42 @@ export class GraphQLClient {
   }
 
   /**
-   * Make a batch of GraphQL queries
+   * Make a batch of GraphQL queries (optimized)
+   * Automatically splits large batches into smaller chunks for better performance
    */
   async batchQuery(batch: BatchRequest): Promise<BatchResponse> {
+    const MAX_BATCH_SIZE = 50; // Facebook's recommended batch size
+    
+    if (batch.queries.length <= MAX_BATCH_SIZE) {
+      return this.executeBatch(batch);
+    }
+
+    // Split into multiple batches if too large
+    const chunks: BatchRequest[] = [];
+    for (let i = 0; i < batch.queries.length; i += MAX_BATCH_SIZE) {
+      chunks.push({
+        queries: batch.queries.slice(i, i + MAX_BATCH_SIZE),
+      });
+    }
+
+    logger.debug(`Splitting ${batch.queries.length} queries into ${chunks.length} batches`);
+
+    // Execute all batches in parallel
+    const results = await Promise.all(chunks.map(chunk => this.executeBatch(chunk)));
+    
+    // Combine results
+    const allResponses: BatchResponse['responses'] = [];
+    for (const result of results) {
+      allResponses.push(...result.responses);
+    }
+
+    return { responses: allResponses };
+  }
+
+  /**
+   * Execute a single batch query
+   */
+  private async executeBatch(batch: BatchRequest): Promise<BatchResponse> {
     const formData = this.buildFormData();
     
     const payload: Record<string, string> = {
@@ -144,14 +177,14 @@ export class GraphQLClient {
       __hsi: generateRandomString(12),
       __dyn: this.generateDyn(),
       __csr: '',
-      __comet_req: '0',
+      __comet_req: '7',
       fb_dtsg: this.fbDtsg,
       jazoest: this.generateJazoest(),
       lsd: generateRandomString(12),
       ...formData,
     };
 
-    // Add batch queries
+    // Add batch queries with optimized indexing
     batch.queries.forEach((q, index) => {
       const queryKey = `q${index}`;
       payload[queryKey] = JSON.stringify({
@@ -187,11 +220,19 @@ export class GraphQLClient {
       );
     }
 
-    // Parse responses
+    // Parse responses with error handling per query
     const responses: BatchResponse['responses'] = batch.queries.map((q, index) => {
       const key = `q${index}`;
       const responseData = data[key] as GraphQLResponse<unknown>;
       
+      if (!responseData) {
+        return {
+          name: q.name,
+          data: null,
+          error: { message: `No response for query ${q.name}` },
+        };
+      }
+
       return {
         name: q.name,
         data: responseData?.data,

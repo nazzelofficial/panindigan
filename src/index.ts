@@ -17,6 +17,13 @@ export { CookieParser } from './auth/CookieParser.js';
 
 // MQTT
 export { MQTTClient } from './mqtt/MQTTClient.js';
+export { FastMQTT, type FastMQTTOptions } from './mqtt/FastMQTT.js';
+
+// Security
+export { AntiSuspension, type AntiSuspensionOptions } from './security/AntiSuspension.js';
+
+// Multi-Account
+export { MultiAccountManager, type AccountConfig, type AccountInstance } from './core/MultiAccountManager.js';
 
 // Events
 export { EventParser } from './events/EventParser.js';

@@ -25,8 +25,8 @@ export class MQTTClient extends EventEmitter {
   private connected: boolean = false;
   private connecting: boolean = false;
   private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 10;
-  private reconnectDelay: number = MQTT_DEFAULT_OPTIONS.reconnectPeriod;
+  private maxReconnectAttempts: number = Infinity;
+  private reconnectDelay: number = 3000;
   private reconnectTimer?: NodeJS.Timeout;
   private keepAliveTimer?: NodeJS.Timeout;
   private lastPacketId: number = 0;
@@ -600,18 +600,19 @@ export class MQTTClient extends EventEmitter {
       '/t_delta',
     ];
     
-    const params = new URLSearchParams({
-      cid: this.clientId,
-      sid: seqId,
-      seq: seqId,
-      user: this.session.userId,
-      device_id: this.session.deviceId || '',
-      initial_connection: 'true',
-      bus_version: '3',
-      subscribe_topics: topics.join(','),
-    });
+    // Build URL manually to avoid URLSearchParams truncation issues
+    const params = [
+      `cid=${encodeURIComponent(this.clientId)}`,
+      `sid=${encodeURIComponent(seqId)}`,
+      `seq=${encodeURIComponent(seqId)}`,
+      `user=${encodeURIComponent(this.session.userId)}`,
+      `device_id=${encodeURIComponent(this.session.deviceId || '')}`,
+      'initial_connection=true',
+      'bus_version=3',
+      `subscribe_topics=${encodeURIComponent(topics.join(','))}`,
+    ];
     
-    return `${baseUrl}?${params.toString()}`;
+    return `${baseUrl}?${params.join('&')}`;
   }
 
   /**

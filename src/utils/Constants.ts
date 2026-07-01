@@ -207,15 +207,36 @@ export const RATE_LIMITS = {
 
 // Reconnection settings
 export const RECONNECTION_SETTINGS = {
-  maxAttempts: 10,
-  initialDelay: 1000,
-  maxDelay: 30000,
-  backoffMultiplier: 2,
+  maxAttempts: Infinity,
+  initialDelay: 3000,
+  maxDelay: 60000,
+  backoffMultiplier: 1.5,
   jitter: true,
 };
 
 // Session settings
 export const SESSION_SETTINGS = {
-  refreshInterval: 30 * 60 * 1000,  // 30 minutes
-  validityCheckInterval: 5 * 60 * 1000,  // 5 minutes
+  refreshInterval: 15 * 60 * 1000,  // 15 minutes (optimized)
+  validityCheckInterval: 3 * 60 * 1000,  // 3 minutes (optimized)
+};
+
+// Anti-Suspension settings
+export const ANTI_SUSPENSION_SETTINGS = {
+  typingDelayMin: 500,
+  typingDelayMax: 3000,
+  messageDelayMin: 1000,
+  messageDelayMax: 5000,
+  actionDelayMin: 200,
+  actionDelayMax: 1000,
+  maxMessagesPerMinute: 30,
+  maxActionsPerMinute: 60,
+};
+
+// Fast MQTT settings
+export const FAST_MQTT_SETTINGS = {
+  keepAliveInterval: 60,
+  healthCheckInterval: 30000,
+  connectionTimeout: 60000,
+  maxReconnectDelay: 60000,
+  staleConnectionThreshold: 300000,  // 5 minutes
 };

@@ -60,6 +60,12 @@ The library uses the `webgraphql/query` endpoint which is for user accounts, not
 - **TypeScript-First Architecture**: Built from the ground up with TypeScript for maximum type safety and IntelliSense support
 - **Modern Node.js 22.22.0 Optimized**: Leverages latest V8 engine, native ESM support, and modern JavaScript features
 - **Production-Ready**: Designed for 24/7 uptime with automatic reconnection, error recovery, and comprehensive logging
+- **Anti-Suspension System**: Human-behavior simulation to avoid Facebook bans
+- **Fast MQTT with Auto-Restart**: Optimized connection with health checks and automatic reconnection
+- **Multi-Account Support**: Run multiple Facebook accounts simultaneously
+- **Auto Token Refresh**: Automatic cookie and token refresh for session longevity
+- **Advanced Retry Mechanism**: Exponential backoff for network resilience
+- **Performance Metrics**: Built-in tracking for API performance monitoring
 
 ### Authentication & Session Management
 
@@ -668,6 +674,122 @@ api.on('error', (event) => {
 ---
 
 ## Advanced Features
+
+### Anti-Suspension System
+
+Human-behavior simulation to avoid Facebook bans:
+
+```typescript
+import { AntiSuspension } from 'panindigan';
+
+const antiSuspension = new AntiSuspension({
+  enabled: true,
+  typingDelayMin: 500,
+  typingDelayMax: 3000,
+  messageDelayMin: 1000,
+  messageDelayMax: 5000,
+  actionDelayMin: 200,
+  actionDelayMax: 1000,
+});
+
+// Delay before sending a message
+await antiSuspension.beforeMessage();
+await api.sendText('threadId', 'Hello World!');
+
+// Check rate limit safety
+if (antiSuspension.isRateLimitSafe()) {
+  await api.sendText('threadId', 'Another message');
+}
+
+// Get statistics
+const stats = antiSuspension.getStats();
+console.log(`Messages per minute: ${stats.messagesPerMinute}`);
+```
+
+### Fast MQTT Client
+
+Optimized MQTT connection with auto-restart and health checks:
+
+```typescript
+import { FastMQTT } from 'panindigan';
+
+const fastMQTT = new FastMQTT(session, {
+  maxReconnectAttempts: Infinity,
+  reconnectDelay: 3000,
+  maxReconnectDelay: 60000,
+  keepAliveInterval: 60,
+  connectionTimeout: 60000,
+  autoRestart: true,
+  restartOnDisconnect: true,
+  healthCheckInterval: 30000,
+});
+
+await fastMQTT.connect();
+
+// Get connection stats
+const stats = fastMQTT.getStats();
+console.log('Connected:', stats.connected);
+console.log('Reconnect attempts:', stats.reconnectAttempts);
+```
+
+### Multi-Account Manager
+
+Run multiple Facebook accounts simultaneously:
+
+```typescript
+import { MultiAccountManager } from 'panindigan';
+
+const multiAccount = new MultiAccountManager();
+
+// Add accounts
+await multiAccount.addAccount({
+  id: 'account1',
+  name: 'Main Account',
+  appState: appState1,
+  autoConnect: true,
+});
+
+await multiAccount.addAccount({
+  id: 'account2',
+  name: 'Secondary Account',
+  appState: appState2,
+  autoConnect: true,
+});
+
+// Set default account
+multiAccount.setDefaultAccount('account1');
+
+// Broadcast message to all accounts
+const results = await multiAccount.broadcastMessage('threadId', 'Hello from all accounts!');
+
+// Get statistics
+const stats = multiAccount.getStats();
+console.log('Total accounts:', stats.totalAccounts);
+console.log('Connected accounts:', stats.connectedAccounts);
+```
+
+### Performance Metrics
+
+Track API performance:
+
+```typescript
+import { logger } from 'panindigan';
+
+// Log performance metrics
+logger.logMetrics();
+
+// Get metrics programmatically
+const metrics = logger.getMetrics();
+console.log('API GET avg time:', metrics.api_get?.avgTime);
+console.log('API POST avg time:', metrics.api_post?.avgTime);
+
+// Reset metrics
+logger.resetMetrics();
+```
+
+---
+
+## Advanced Features (Legacy)
 
 ### Polls
 
