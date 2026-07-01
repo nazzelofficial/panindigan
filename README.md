@@ -66,6 +66,10 @@ The library uses the `webgraphql/query` endpoint which is for user accounts, not
 - **Auto Token Refresh**: Automatic cookie and token refresh for session longevity
 - **Advanced Retry Mechanism**: Exponential backoff for network resilience
 - **Performance Metrics**: Built-in tracking for API performance monitoring
+- **Circuit Breaker Pattern**: Prevents cascading failures with automatic recovery
+- **Request Caching**: TTL-based caching to reduce redundant API calls
+- **Token Bucket Rate Limiting**: Precise rate limiting for API abuse prevention
+- **Message Queue with Persistence**: Ensures message delivery during disconnections
 
 ### Authentication & Session Management
 
@@ -785,6 +789,131 @@ console.log('API POST avg time:', metrics.api_post?.avgTime);
 
 // Reset metrics
 logger.resetMetrics();
+```
+
+### Circuit Breaker Pattern
+
+Prevent cascading failures with automatic recovery:
+
+```typescript
+import { CircuitBreaker } from 'panindigan';
+
+const circuitBreaker = new CircuitBreaker({
+  failureThreshold: 5,
+  resetTimeout: 60000,
+});
+
+// Execute with circuit breaker protection
+const result = await circuitBreaker.execute(
+  async () => {
+    return await someRiskyOperation();
+  },
+  'API Call Context'
+);
+
+// Get circuit breaker stats
+const stats = circuitBreaker.getStats();
+console.log('State:', stats.state);
+console.log('Failure count:', stats.failureCount);
+
+// Reset circuit breaker
+circuitBreaker.reset();
+```
+
+### Request Cache
+
+Reduce redundant API calls with TTL-based caching:
+
+```typescript
+import { RequestCache } from 'panindigan';
+
+const cache = new RequestCache({
+  defaultTTL: 300000, // 5 minutes
+  maxSize: 1000,
+});
+
+// Set cache
+cache.set('user:123', userData, 60000);
+
+// Get from cache
+const cached = cache.get('user:123');
+if (cached) {
+  console.log('Cache hit!');
+}
+
+// Clean expired entries
+const cleaned = cache.cleanExpired();
+console.log(`Cleaned ${cleaned} expired entries`);
+
+// Get cache stats
+const stats = cache.getStats();
+console.log('Cache size:', stats.size);
+```
+
+### Token Bucket Rate Limiter
+
+Prevent API abuse with precise rate limiting:
+
+```typescript
+import { RateLimiter } from 'panindigan';
+
+const rateLimiter = new RateLimiter({
+  tokensPerInterval: 30,
+  interval: 1000, // 1 second
+  maxTokens: 100,
+});
+
+// Try to consume token (non-blocking)
+if (rateLimiter.tryConsume(1)) {
+  await api.sendText('threadId', 'Message');
+} else {
+  console.log('Rate limit reached');
+}
+
+// Wait for tokens (blocking)
+await rateLimiter.waitForTokens(1);
+await api.sendText('threadId', 'Message');
+
+// Get rate limiter stats
+const stats = rateLimiter.getStats();
+console.log('Available tokens:', stats.tokens);
+```
+
+### Message Queue with Persistence
+
+Ensure message delivery during disconnections:
+
+```typescript
+import { MessageQueue } from 'panindigan';
+
+const messageQueue = new MessageQueue({
+  maxSize: 1000,
+  persistencePath: './message-queue.json',
+  autoSave: true,
+});
+
+// Enqueue message
+const messageId = messageQueue.enqueue({
+  threadId: 'threadId',
+  body: 'Hello World!',
+  priority: 1,
+  maxAttempts: 3,
+});
+
+// Process queue
+await messageQueue.process(async (message) => {
+  try {
+    await api.sendText(message.threadId, message.body);
+    return true; // Success
+  } catch (error) {
+    return false; // Will retry
+  }
+});
+
+// Get queue stats
+const stats = messageQueue.getStats();
+console.log('Queue size:', stats.size);
+console.log('Oldest message:', stats.oldestMessage);
 ```
 
 ---

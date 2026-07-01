@@ -1,11 +1,14 @@
 /**
  * HTTP Request Handler for Panindigan
- * Advanced retry mechanism with exponential backoff
+ * Advanced retry mechanism with exponential backoff, circuit breaker, caching, and rate limiting
  */
 
 import type { CookieJar } from 'tough-cookie';
 import { logger } from '../utils/Logger.js';
 import { DEFAULT_HEADERS, ERROR_CODES, FACEBOOK_BASE_URL } from '../utils/Constants.js';
+import { CircuitBreaker } from '../utils/CircuitBreaker.js';
+import { RequestCache } from '../utils/RequestCache.js';
+import { RateLimiter } from '../utils/RateLimiter.js';
 import type { RequestOptions, APIError } from '../types/index.js';
 
 export class RequestHandler {
@@ -14,17 +17,42 @@ export class RequestHandler {
   private defaultTimeout: number = 30000;
   private maxRetries: number = 3;
   private retryDelay: number = 1000;
+  private circuitBreaker: CircuitBreaker;
+  private cache: RequestCache;
+  private rateLimiter: RateLimiter;
 
   constructor(cookieJar: CookieJar, userAgent: string, _proxy?: string) {
     this.cookieJar = cookieJar;
     this.userAgent = userAgent;
-    // Proxy support reserved for future implementation
+    this.circuitBreaker = new CircuitBreaker({
+      failureThreshold: 5,
+      resetTimeout: 60000,
+    });
+    this.cache = new RequestCache({
+      defaultTTL: 300000,
+      maxSize: 1000,
+    });
+    this.rateLimiter = new RateLimiter({
+      tokensPerInterval: 30,
+      interval: 1000,
+      maxTokens: 100,
+    });
   }
 
   /**
    * Make an HTTP GET request
    */
   async get(url: string, options: RequestOptions = {}): Promise<Response> {
+    // Check cache for GET requests
+    if (!options.skipCache) {
+      const cacheKey = this.getCacheKey('GET', url, options);
+      const cached = this.cache.get<string>(cacheKey);
+      if (cached) {
+        logger.debug(`Cache hit for ${url}`);
+        return new Response(cached, { status: 200, statusText: 'OK' });
+      }
+    }
+
     return this.request('GET', url, undefined, options);
   }
 
@@ -211,5 +239,33 @@ export class RequestHandler {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Generate cache key
+   */
+  private getCacheKey(method: string, url: string, options: RequestOptions): string {
+    return `${method}:${url}:${JSON.stringify(options)}`;
+  }
+
+  /**
+   * Get cache instance
+   */
+  getCache(): RequestCache {
+    return this.cache;
+  }
+
+  /**
+   * Get circuit breaker instance
+   */
+  getCircuitBreaker(): CircuitBreaker {
+    return this.circuitBreaker;
+  }
+
+  /**
+   * Get rate limiter instance
+   */
+  getRateLimiter(): RateLimiter {
+    return this.rateLimiter;
   }
 }

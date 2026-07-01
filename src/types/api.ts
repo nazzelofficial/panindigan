@@ -59,6 +59,8 @@ export interface RequestOptions {
   retries?: number;
   retryDelay?: number;
   headers?: Record<string, string>;
+  skipCache?: boolean;
+  skipRateLimit?: boolean;
 }
 
 export interface FacebookAPIEndpoints {

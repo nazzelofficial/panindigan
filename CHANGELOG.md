@@ -5,6 +5,55 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-02
+
+### Added
+
+#### Resilience Patterns (`src/utils/`)
+- **Circuit Breaker Pattern** (`CircuitBreaker`)
+  - Prevents cascading failures by stopping requests to failing services
+  - Three states: CLOSED, OPEN, HALF_OPEN
+  - Configurable failure threshold (default: 5) and reset timeout (default: 60s)
+  - Automatic recovery with exponential backoff
+  - Statistics tracking for monitoring
+
+- **Request Cache** (`RequestCache`)
+  - TTL-based caching for GET requests (default: 5 minutes)
+  - Configurable max size (default: 1000 entries)
+  - Automatic eviction of oldest entries when full
+  - Expired entry cleanup
+  - Cache statistics and management
+
+- **Token Bucket Rate Limiter** (`RateLimiter`)
+  - Token bucket algorithm for precise rate limiting
+  - Configurable tokens per interval (default: 30/second)
+  - Configurable max tokens (default: 100)
+  - Blocking and non-blocking token consumption
+  - Wait time calculation for tokens
+
+- **Message Queue with Persistence** (`MessageQueue`)
+  - Priority-based message queueing
+  - Disk persistence for message durability
+  - Automatic retry with exponential backoff
+  - Configurable max attempts and queue size
+  - Queue statistics and monitoring
+
+#### API Layer (`src/api/`)
+- **Integrated Resilience Features** (`RequestHandler`)
+  - Circuit breaker protection for all requests
+  - Automatic caching for GET requests
+  - Rate limiting for all API calls
+  - Configurable skip options for cache and rate limit
+  - Access to cache, circuit breaker, and rate limiter instances
+
+### Changed
+
+#### Type Definitions (`src/types/`)
+- **RequestOptions Interface**
+  - Added `skipCache` option to bypass caching
+  - Added `skipRateLimit` option to bypass rate limiting
+  - Better control over request behavior
+
 ## [1.0.9] - 2026-07-02
 
 ### Changed

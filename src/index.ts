@@ -39,6 +39,10 @@ export { GraphQLClient } from './api/GraphQLClient.js';
 export { Logger, logger } from './utils/Logger.js';
 export * as Constants from './utils/Constants.js';
 export * as Helpers from './utils/Helpers.js';
+export { CircuitBreaker, type CircuitBreakerOptions, CircuitState } from './utils/CircuitBreaker.js';
+export { RequestCache, type CacheOptions, type CacheEntry } from './utils/RequestCache.js';
+export { RateLimiter, type RateLimiterOptions } from './utils/RateLimiter.js';
+export { MessageQueue, type QueuedMessage, type MessageQueueOptions } from './utils/MessageQueue.js';
 
 // Type Exports
 export type {
