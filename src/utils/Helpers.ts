@@ -1,16 +1,16 @@
 /**
  * Helper Utilities for Panindigan
  */
-
+ 
 import { randomBytes } from 'crypto';
-
+ 
 /**
  * Generate a random string of specified length
  */
 export function generateRandomString(length: number = 16): string {
   return randomBytes(length).toString('hex').substring(0, length);
 }
-
+ 
 /**
  * Generate a UUID v4
  */
@@ -21,21 +21,21 @@ export function generateUUID(): string {
     return v.toString(16);
   });
 }
-
+ 
 /**
  * Generate a client ID for MQTT
  */
 export function generateClientId(): string {
   return `mqtt-${generateRandomString(8)}`;
 }
-
+ 
 /**
  * Generate device ID
  */
 export function generateDeviceId(): string {
   return `device-${generateRandomString(16)}`;
 }
-
+ 
 /**
  * Generate jazoest value from fb_dtsg
  */
@@ -46,7 +46,7 @@ export function generateJazoest(fbDtsg: string): string {
   }
   return `2${sum}`;
 }
-
+ 
 /**
  * Parse cookie string to object
  */
@@ -60,7 +60,7 @@ export function parseCookieString(cookieStr: string): Record<string, string> {
   });
   return cookies;
 }
-
+ 
 /**
  * Convert cookies object to string
  */
@@ -69,7 +69,7 @@ export function cookiesToString(cookies: Record<string, string>): string {
     .map(([name, value]) => `${name}=${value}`)
     .join('; ');
 }
-
+ 
 /**
  * Extract fb_dtsg from HTML
  */
@@ -82,7 +82,7 @@ export function extractFbDtsg(html: string): string | null {
     /"fb_dtsg":"([^"]+)"/,
     /DTSGInitData.*token":"([^"]+)"/,
   ];
-
+ 
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
@@ -91,7 +91,7 @@ export function extractFbDtsg(html: string): string | null {
   }
   return null;
 }
-
+ 
 /**
  * Extract user ID from HTML or cookies
  */
@@ -102,7 +102,7 @@ export function extractUserId(html: string): string | null {
     /"current_user_id":"(\d+)"/,
     /"userID":"(\d+)"/,
   ];
-
+ 
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
@@ -111,7 +111,7 @@ export function extractUserId(html: string): string | null {
   }
   return null;
 }
-
+ 
 /**
  * Extract iris sequence ID from HTML
  */
@@ -120,8 +120,17 @@ export function extractIrisSeqId(html: string): string | null {
     /"irisSeqId":"(\d+)"/,
     /"seq_id":(\d+)/,
     /"lastSeqId":(\d+)/,
+    /"iris_seq_id":(\d+)/,
+    /"seqId":(\d+)/,
+    /"sequenceId":(\d+)/,
+    /seq_id=(\d+)/,
+    /iris_seq_id=(\d+)/,
+    /"iris_seq_id":"(\d+)"/,
+    /"seq_id":"(\d+)"/,
+    /irisSeqId=(\d+)/,
+    /seqId=(\d+)/,
   ];
-
+ 
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
@@ -130,7 +139,7 @@ export function extractIrisSeqId(html: string): string | null {
   }
   return null;
 }
-
+ 
 /**
  * Format thread ID (handle both user and group IDs)
  */
@@ -142,7 +151,7 @@ export function formatThreadId(id: string): string {
   // Otherwise, assume it's a valid thread ID
   return id;
 }
-
+ 
 /**
  * Check if ID is a group/thread ID
  */
@@ -150,7 +159,7 @@ export function isGroupId(id: string): boolean {
   // Group IDs typically start with a number and have specific patterns
   return /^\d{15,16}$/.test(id);
 }
-
+ 
 /**
  * Check if ID is a user ID
  */
@@ -158,14 +167,14 @@ export function isUserId(id: string): boolean {
   // User IDs are typically 15 digits
   return /^\d{15}$/.test(id);
 }
-
+ 
 /**
  * Generate a request ID
  */
 export function generateRequestId(): string {
   return generateRandomString(8);
 }
-
+ 
 /**
  * Generate __req parameter
  */
@@ -179,14 +188,14 @@ export function generateReqParam(): string {
   }
   return result;
 }
-
+ 
 /**
  * Sleep/delay utility
  */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
+ 
 /**
  * Retry a function with exponential backoff
  */
@@ -198,7 +207,7 @@ export async function retryWithBackoff<T>(
 ): Promise<T> {
   let lastError: Error | undefined;
   let delay = initialDelay;
-
+ 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await fn();
@@ -213,10 +222,10 @@ export async function retryWithBackoff<T>(
       }
     }
   }
-
+ 
   throw lastError;
 }
-
+ 
 /**
  * Validate email format
  */
@@ -224,7 +233,7 @@ export function isValidEmail(email: string): boolean {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
 }
-
+ 
 /**
  * Truncate string with ellipsis
  */
@@ -232,7 +241,7 @@ export function truncate(str: string, maxLength: number): string {
   if (str.length <= maxLength) return str;
   return str.substring(0, maxLength - 3) + '...';
 }
-
+ 
 /**
  * Deep merge objects
  */
@@ -255,7 +264,7 @@ export function deepMerge<T extends Record<string, unknown>>(
   
   return result;
 }
-
+ 
 /**
  * Get MIME type from file extension
  */
@@ -279,7 +288,7 @@ export function getMimeTypeFromExtension(filename: string): string {
   };
   return mimeTypes[ext || ''] || 'application/octet-stream';
 }
-
+ 
 /**
  * Format bytes to human readable
  */
@@ -290,7 +299,7 @@ export function formatBytes(bytes: number, decimals: number = 2): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
 }
-
+ 
 /**
  * Parse URL parameters
  */
@@ -302,7 +311,7 @@ export function parseUrlParams(url: string): Record<string, string> {
   });
   return params;
 }
-
+ 
 /**
  * Build URL with query parameters
  */

@@ -45,7 +45,10 @@ export class EventParser {
         case '/t_messaging_events':
           return this.parseMessagingEvent(data);
         default:
-          if (topic.startsWith('/mqtt_c2b_')) {
+          // NOTE: MQTTClient subscribes to `mqtt_c2b_${userId}` (no leading slash),
+          // so the check here must match that exact prefix or C2B/personal
+          // message events will always fall through as "unhandled".
+          if (topic.startsWith('mqtt_c2b_')) {
             return this.parseC2BEvent(data);
           }
           logger.debug('Unhandled topic', { topic });

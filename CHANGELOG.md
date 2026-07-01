@@ -5,6 +5,38 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-02
+
+### Fixed
+
+#### Critical Bug Fixes
+- **MQTT User ID Truncation** (`src/mqtt/MQTTClient.ts`)
+  - Fixed critical bug where long user IDs were being truncated in MQTT broker URL
+  - Removed URLSearchParams encoding which caused precision loss
+  - Added explicit String() conversion to prevent numeric precision issues
+  - Added detailed logging for URL length and user ID length debugging
+  - This was causing MQTT connection failures for accounts with long user IDs
+
+- **Iris Sequence ID Extraction (src/utils/Helpers.ts, src/session/SessionManager.ts)
+
+  - Added 9 additional regex patterns for iris sequence ID extraction in extractIrisSeqId()
+  - Patterns now cover: irisSeqId, seq_id, lastSeqId, iris_seq_id, seqId, sequenceId, and URL parameter formats
+  - Fixed SessionManager.refreshSession(), which was still calling a single inline regex instead of the new extractIrisSeqId() helper 
+  - the 9 additional patterns were being added but never actually run. Now wired up correctly, so all 12 patterns are used.
+  - Removed the fallback that generated a fake sequence ID from the current timestamp when no real one was found. A timestamp is not a valid position in Facebook's Iris sync stream, and sending one risked broker rejection or silently skipped messages. If no real sequence ID is available, sid/seq are now omitted and a warning is logged instead.
+
+- **Session User ID Handling (src/session/SessionManager.ts)
+  - Added explicit String() conversion for user ID during session creation
+  - Prevents numeric precision loss for large user IDs
+  - Ensures consistent string type throughout session lifecycle
+
+#### MQTT Connection Improvements (`src/mqtt/MQTTClient.ts`)
+  - Added WebSocket compression headers (`Sec-WebSocket-Extensions`)
+  - Added WebSocket version header (`Sec-WebSocket-Version: 13`)
+  - Added handshake timeout configuration
+  - Enhanced connection logging with URL length and user ID length
+  - Improved error reporting for connection failures
+
 ## [1.1.0] - 2026-07-02
 
 ### Added

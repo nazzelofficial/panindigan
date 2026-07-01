@@ -2,7 +2,7 @@
  * MQTT Client for Panindigan
  * genuine MQTT over WebSocket for real-time messaging
  */
-
+ 
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/Logger.js';
@@ -10,14 +10,14 @@ import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS } from '../utils/Constants.js';
 import { generateClientId } from '../utils/Helpers.js';
 import { EventParser } from '../events/EventParser.js';
 import type { Session, PanindiganEvent } from '../types/index.js';
-
+ 
 interface MQTTMessage {
   topic: string;
   payload: Buffer;
   qos: number;
   retain: boolean;
 }
-
+ 
 export class MQTTClient extends EventEmitter {
   private ws: WebSocket | null = null;
   private session: Session;
@@ -35,7 +35,7 @@ export class MQTTClient extends EventEmitter {
   // Use 180s timeout for MQTT connection (Facebook can be slow with groups)
   private connectionTimeout: number = 180000;
   private eventParser: EventParser;
-
+ 
   constructor(session: Session) {
     super();
     this.session = session;
@@ -44,7 +44,7 @@ export class MQTTClient extends EventEmitter {
     // Increase max listeners to prevent memory leak warnings
     this.setMaxListeners(50);
   }
-
+ 
   /**
    * Connect to MQTT broker
    */
@@ -52,10 +52,10 @@ export class MQTTClient extends EventEmitter {
     if (this.connected || this.connecting) {
       return;
     }
-
+ 
     this.connecting = true;
     logger.logMQTT('connecting', { clientId: this.clientId, userId: this.session.userId });
-
+ 
     try {
       // Build connection URL with authentication
       const brokerUrl = this.buildBrokerUrl();
@@ -63,6 +63,9 @@ export class MQTTClient extends EventEmitter {
       
       logger.debug('MQTT connection details', { 
         brokerUrl: brokerUrl.substring(0, 100) + '...', 
+        brokerUrlLength: brokerUrl.length,
+        userId: this.session.userId,
+        userIdLength: this.session.userId.length,
         cookieCount: this.session.cookies.length,
         hasCUser: this.session.cookies.some(c => c.key === 'c_user'),
         hasXS: this.session.cookies.some(c => c.key === 'xs'),
@@ -80,10 +83,13 @@ export class MQTTClient extends EventEmitter {
           'Referer': 'https://www.facebook.com/',
           'Connection': 'upgrade',
           'Upgrade': 'websocket',
+          'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits',
+          'Sec-WebSocket-Version': '13',
         },
         timeout: this.connectionTimeout,
+        handshakeTimeout: this.connectionTimeout,
       });
-
+ 
       // Set up event handlers
       this.ws.on('open', () => this.handleOpen());
       this.ws.on('message', (data) => this.handleMessage(data as Buffer));
@@ -95,7 +101,7 @@ export class MQTTClient extends EventEmitter {
         });
         this.handleError(error);
       });
-
+ 
       // Wait for connection
       await new Promise<void>((resolve, reject) => {
         let resolved = false;
@@ -128,7 +134,7 @@ export class MQTTClient extends EventEmitter {
           
           reject(new Error(errorMsg));
         }, this.connectionTimeout);
-
+ 
         const onConnect = () => {
           if (resolved) return;
           resolved = true;
@@ -136,7 +142,7 @@ export class MQTTClient extends EventEmitter {
           this.off('error', onError);
           resolve();
         };
-
+ 
         const onError = (error: Error) => {
           if (resolved) return;
           resolved = true;
@@ -144,11 +150,11 @@ export class MQTTClient extends EventEmitter {
           this.off('connect', onConnect);
           reject(error);
         };
-
+ 
         this.once('connect', onConnect);
         this.once('error', onError);
       });
-
+ 
     } catch (error) {
       this.connecting = false;
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -160,7 +166,7 @@ export class MQTTClient extends EventEmitter {
       throw error;
     }
   }
-
+ 
   /**
    * Disconnect from MQTT broker
    */
@@ -182,7 +188,7 @@ export class MQTTClient extends EventEmitter {
     this.connecting = false;
     this.emit('disconnect');
   }
-
+ 
   /**
    * Subscribe to a topic
    */
@@ -190,14 +196,14 @@ export class MQTTClient extends EventEmitter {
     if (!this.connected || !this.ws) {
       throw new Error('Not connected to MQTT broker');
     }
-
+ 
     const packetId = this.getNextPacketId();
     const subscribePacket = this.buildSubscribePacket(packetId, topic, qos);
     
     this.ws.send(subscribePacket);
     logger.logMQTT('subscribed', { topic, qos });
   }
-
+ 
   /**
    * Publish a message
    */
@@ -208,23 +214,23 @@ export class MQTTClient extends EventEmitter {
       qos,
       retain,
     };
-
+ 
     if (!this.connected || !this.ws) {
       // Queue message for later
       this.messageQueue.push(message);
       return;
     }
-
+ 
     this.sendPublish(message);
   }
-
+ 
   /**
    * Check if connected
    */
   isConnected(): boolean {
     return this.connected;
   }
-
+ 
   /**
    * Handle WebSocket open
    */
@@ -234,7 +240,7 @@ export class MQTTClient extends EventEmitter {
     // Send MQTT CONNECT packet
     this.sendConnect();
   }
-
+ 
   /**
    * Handle incoming WebSocket message
    */
@@ -266,7 +272,7 @@ export class MQTTClient extends EventEmitter {
       logger.logMQTT('packet parse error', error);
     }
   }
-
+ 
   /**
    * Handle WebSocket close
    */
@@ -283,7 +289,7 @@ export class MQTTClient extends EventEmitter {
       this.scheduleReconnect();
     }
   }
-
+ 
   /**
    * Handle WebSocket error
    */
@@ -291,7 +297,7 @@ export class MQTTClient extends EventEmitter {
     logger.logMQTT('WebSocket error', error);
     this.emit('error', error);
   }
-
+ 
   /**
    * Handle CONNACK packet
    */
@@ -341,7 +347,7 @@ export class MQTTClient extends EventEmitter {
       this.emit('error', error);
     }
   }
-
+ 
   /**
    * Handle PUBLISH packet
    */
@@ -357,7 +363,7 @@ export class MQTTClient extends EventEmitter {
     // Parse and emit specific events
     this.parseAndEmitEvent(packet.topic, packet.payload);
   }
-
+ 
   /**
    * Handle PUBACK packet
    */
@@ -368,21 +374,21 @@ export class MQTTClient extends EventEmitter {
       this.pendingAcks.delete(packet.packetId);
     }
   }
-
+ 
   /**
    * Handle SUBACK packet
    */
   private handleSubAck(packet: { packetId: number; grantedQos: number[] }): void {
     logger.logMQTT('subscription acknowledged', { packetId: packet.packetId });
   }
-
+ 
   /**
    * Handle PINGRESP packet
    */
   private handlePingResp(): void {
     logger.logMQTT('ping response received');
   }
-
+ 
   /**
    * Send CONNECT packet
    */
@@ -413,7 +419,7 @@ export class MQTTClient extends EventEmitter {
       this.emit('error', new Error(`Failed to send CONNECT packet: ${errorMsg}`));
     }
   }
-
+ 
   /**
    * Send DISCONNECT packet
    */
@@ -422,7 +428,7 @@ export class MQTTClient extends EventEmitter {
     const packet = Buffer.from([0xE0, 0x00]);
     this.ws?.send(packet);
   }
-
+ 
   /**
    * Send PUBLISH packet
    */
@@ -447,7 +453,7 @@ export class MQTTClient extends EventEmitter {
       });
     }
   }
-
+ 
   /**
    * Send PUBACK packet
    */
@@ -455,7 +461,7 @@ export class MQTTClient extends EventEmitter {
     const packet = this.buildPubAckPacket(packetId);
     this.ws?.send(packet);
   }
-
+ 
   /**
    * Send PINGREQ packet
    */
@@ -465,7 +471,7 @@ export class MQTTClient extends EventEmitter {
     this.ws?.send(packet);
     logger.logMQTT('ping sent');
   }
-
+ 
   /**
    * Subscribe to required topics
    */
@@ -497,7 +503,7 @@ export class MQTTClient extends EventEmitter {
       }
     }
   }
-
+ 
   /**
    * Process queued messages
    */
@@ -509,7 +515,7 @@ export class MQTTClient extends EventEmitter {
       }
     }
   }
-
+ 
   /**
    * Start keep-alive timer
    */
@@ -520,7 +526,7 @@ export class MQTTClient extends EventEmitter {
       }
     }, MQTT_DEFAULT_OPTIONS.keepalive * 1000);
   }
-
+ 
   /**
    * Stop keep-alive timer
    */
@@ -530,7 +536,7 @@ export class MQTTClient extends EventEmitter {
       this.keepAliveTimer = undefined;
     }
   }
-
+ 
   /**
    * Schedule reconnection
    */
@@ -553,7 +559,7 @@ export class MQTTClient extends EventEmitter {
       }
     }, delay);
   }
-
+ 
   /**
    * Stop reconnection
    */
@@ -563,7 +569,7 @@ export class MQTTClient extends EventEmitter {
       this.reconnectTimer = undefined;
     }
   }
-
+ 
   /**
    * Get next packet ID
    */
@@ -571,7 +577,7 @@ export class MQTTClient extends EventEmitter {
     this.lastPacketId = (this.lastPacketId + 1) % 65536;
     return this.lastPacketId;
   }
-
+ 
   /**
    * Build broker URL
    */
@@ -579,11 +585,17 @@ export class MQTTClient extends EventEmitter {
     // Use Facebook's MQTT broker with session credentials
     const baseUrl = MQTT_BROKER_URLS[0];
     
-    // Use irisSeqId if available, otherwise generate a sequence ID
-    const seqId = this.session.irisSeqId && this.session.irisSeqId !== '0' 
-      ? this.session.irisSeqId 
-      : Math.floor(Date.now() / 1000).toString();
-    
+    // Only use a real irisSeqId extracted from Facebook. Do not fabricate one:
+    // a guessed value (e.g. a timestamp) is not a valid position in Iris's
+    // sequence stream and can cause the broker to reject the connection or
+    // silently skip messages that were never actually synced.
+    const hasRealSeqId = !!this.session.irisSeqId && this.session.irisSeqId !== '0';
+    if (!hasRealSeqId) {
+      logger.warn('No real irisSeqId available for MQTT connect; connecting without sid/seq (broker will treat this as a fresh sync)', {
+        userId: this.session.userId,
+      });
+    }
+ 
     // Subscribe topics for URL params
     const topics = [
       '/t_ms',
@@ -601,20 +613,20 @@ export class MQTTClient extends EventEmitter {
     ];
     
     // Build URL manually to avoid URLSearchParams truncation issues
+    // IMPORTANT: Do not use URLSearchParams as it truncates long user IDs
     const params = [
-      `cid=${encodeURIComponent(this.clientId)}`,
-      `sid=${encodeURIComponent(seqId)}`,
-      `seq=${encodeURIComponent(seqId)}`,
-      `user=${encodeURIComponent(this.session.userId)}`,
-      `device_id=${encodeURIComponent(this.session.deviceId || '')}`,
+      `cid=${this.clientId}`,
+      ...(hasRealSeqId ? [`sid=${this.session.irisSeqId}`, `seq=${this.session.irisSeqId}`] : []),
+      `user=${this.session.userId}`,
+      `device_id=${this.session.deviceId || ''}`,
       'initial_connection=true',
       'bus_version=3',
-      `subscribe_topics=${encodeURIComponent(topics.join(','))}`,
+      `subscribe_topics=${topics.join(',')}`,
     ];
     
     return `${baseUrl}?${params.join('&')}`;
   }
-
+ 
   /**
    * Build cookie header
    */
@@ -628,7 +640,7 @@ export class MQTTClient extends EventEmitter {
       .map((c) => `${c.key}=${c.value}`)
       .join('; ');
   }
-
+ 
   /**
    * Parse MQTT packet
    */
@@ -665,7 +677,7 @@ export class MQTTClient extends EventEmitter {
         return { type };
     }
   }
-
+ 
   /**
    * Parse PUBLISH packet
    */
@@ -703,7 +715,7 @@ export class MQTTClient extends EventEmitter {
     
     return { type: 'PUBLISH', topic, payload, qos, packetId };
   }
-
+ 
   /**
    * Build CONNECT packet
    */
@@ -755,7 +767,7 @@ export class MQTTClient extends EventEmitter {
     
     return Buffer.concat([fixedHeader, variableHeader, payload]);
   }
-
+ 
   /**
    * Encode remaining length as variable-length quantity (MQTT spec)
    */
@@ -774,7 +786,7 @@ export class MQTTClient extends EventEmitter {
     
     return Buffer.from(encoded);
   }
-
+ 
   /**
    * Build SUBSCRIBE packet
    */
@@ -801,7 +813,7 @@ export class MQTTClient extends EventEmitter {
     
     return Buffer.concat([fixedHeader, payload]);
   }
-
+ 
   /**
    * Build PUBLISH packet
    */
@@ -827,14 +839,14 @@ export class MQTTClient extends EventEmitter {
     
     return Buffer.concat([fixedHeader, variableHeader, message.payload]);
   }
-
+ 
   /**
    * Build PUBACK packet
    */
   private buildPubAckPacket(packetId: number): Buffer {
     return Buffer.from([0x40, 0x02, (packetId >> 8) & 0xFF, packetId & 0xFF]);
   }
-
+ 
   /**
    * Parse and emit specific events from MQTT messages
    */
@@ -853,14 +865,14 @@ export class MQTTClient extends EventEmitter {
       this.emit('event', event);
     }
   }
-
+ 
   /**
    * Get the event parser instance
    */
   getEventParser(): EventParser {
     return this.eventParser;
   }
-
+ 
   /**
    * Parse a raw event manually
    */

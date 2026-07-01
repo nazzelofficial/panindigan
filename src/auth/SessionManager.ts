@@ -2,48 +2,51 @@
  * Session Manager for Panindigan
  * Handles session persistence, validation, and refresh
  */
-
+ 
 import { readFile, writeFile, access } from 'fs/promises';
 import { CookieJar } from 'tough-cookie';
 import type { Session, AppState, SessionValidationResult } from '../types/index.js';
 import { CookieParser } from './CookieParser.js';
 import { logger } from '../utils/Logger.js';
-import { generateDeviceId, generateUUID } from '../utils/Helpers.js';
+import { generateDeviceId, generateUUID, extractIrisSeqId } from '../utils/Helpers.js';
 import { SESSION_SETTINGS } from '../utils/Constants.js';
-
+ 
 export class SessionManager {
   private session: Session | null = null;
   private cookieJar: CookieJar;
   private sessionPath?: string;
   private refreshInterval?: NodeJS.Timeout;
   private validationInterval?: NodeJS.Timeout;
-
+ 
   constructor(cookieJar: CookieJar, sessionPath?: string) {
     this.cookieJar = cookieJar;
     this.sessionPath = sessionPath;
   }
-
+ 
   /**
    * Create a new session from AppState
    */
   async createSession(appState: AppState): Promise<Session> {
     logger.info('Creating new session');
-
+ 
     // Validate cookies
     const validation = CookieParser.validateCookies(appState.cookies);
     if (!validation.valid) {
       throw new Error(`Missing required cookies: ${validation.missing.join(', ')}`);
     }
-
+ 
     // Get user ID from cookies
     const userId = appState.userId || CookieParser.getCookieValue(appState.cookies, 'c_user');
     if (!userId) {
       throw new Error('Could not extract user ID from cookies');
     }
-
+ 
+    // Ensure userId is always a string to prevent precision loss
+    const stringUserId = String(userId);
+ 
     // Create session
     this.session = {
-      userId,
+      userId: stringUserId,
       fbDtsg: appState.fbDtsg || '',
       cookies: appState.cookies,
       token: appState.token,
@@ -55,50 +58,50 @@ export class SessionManager {
       createdAt: new Date(),
       lastActive: new Date(),
     };
-
+ 
     // Add cookies to jar
     await this.syncCookiesToJar();
-
+ 
     // Save session if path is provided
     if (this.sessionPath) {
       await this.saveSession();
     }
-
+ 
     // Start auto-refresh
     this.startAutoRefresh();
-
+ 
     logger.info('Session created successfully', { userId });
     return this.session;
   }
-
+ 
   /**
    * Get current session
    */
   getSession(): Session | null {
     return this.session;
   }
-
+ 
   /**
    * Check if logged in
    */
   isLoggedIn(): boolean {
     return this.session?.loggedIn ?? false;
   }
-
+ 
   /**
    * Get user ID
    */
   getUserId(): string | null {
     return this.session?.userId ?? null;
   }
-
+ 
   /**
    * Get fb_dtsg token
    */
   getFbDtsg(): string | null {
     return this.session?.fbDtsg ?? null;
   }
-
+ 
   /**
    * Update fb_dtsg token
    */
@@ -108,7 +111,7 @@ export class SessionManager {
       this.session.lastActive = new Date();
     }
   }
-
+ 
   /**
    * Update iris sequence ID
    */
@@ -117,7 +120,7 @@ export class SessionManager {
       this.session.irisSeqId = seqId;
     }
   }
-
+ 
   /**
    * Validate the current session
    */
@@ -125,45 +128,45 @@ export class SessionManager {
     if (!this.session) {
       return { valid: false, expired: true, error: 'No active session' };
     }
-
+ 
     try {
       // Check if c_user and xs cookies are still valid
       const cookies = await this.cookieJar.getCookies('https://www.facebook.com');
       const cUser = cookies.find((c) => c.key === 'c_user');
       const xs = cookies.find((c) => c.key === 'xs');
-
+ 
       if (!cUser || !xs) {
         this.session.loggedIn = false;
         return { valid: false, expired: true, error: 'Missing required cookies' };
       }
-
+ 
       // Check if user ID matches
       if (cUser.value !== this.session.userId) {
         this.session.loggedIn = false;
         return { valid: false, expired: true, error: 'User ID mismatch' };
       }
-
+ 
       // Update last active
       this.session.lastActive = new Date();
-
+ 
       return { valid: true, expired: false, userId: this.session.userId };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       return { valid: false, expired: true, error: errorMsg };
     }
   }
-
+ 
   /**
    * Refresh the session with automatic token extraction
    */
   async refreshSession(): Promise<boolean> {
     logger.info('Refreshing session with auto token refresh');
-
+ 
     if (!this.session) {
       logger.error('Cannot refresh: no active session');
       return false;
     }
-
+ 
     try {
       // Re-validate cookies
       const cookies = await this.cookieJar.getCookies('https://www.facebook.com');
@@ -173,7 +176,7 @@ export class SessionManager {
         domain: c.domain,
         path: c.path,
       }));
-
+ 
       // Update session cookies
       this.session.cookies = cookieArray.map(c => ({
         key: c.key,
@@ -182,7 +185,7 @@ export class SessionManager {
         path: c.path || '/',
       }));
       this.session.lastActive = new Date();
-
+ 
       // Auto-refresh fb_dtsg token by fetching Facebook homepage
       try {
         const response = await fetch('https://www.facebook.com', {
@@ -192,7 +195,7 @@ export class SessionManager {
             'Accept-Language': 'en-US,en;q=0.9',
           },
         });
-
+ 
         if (response.ok) {
           const html = await response.text();
           const fbDtsgMatch = html.match(/"DTSGInitialData",\s*\[\],\s*{"token":"([^"]+)"/);
@@ -200,23 +203,25 @@ export class SessionManager {
             this.session.fbDtsg = fbDtsgMatch[1];
             logger.info('Auto-refreshed fb_dtsg token');
           }
-
-          // Extract iris sequence ID if available
-          const irisMatch = html.match(/"irisSeqId":"(\d+)"/);
-          if (irisMatch && irisMatch[1]) {
-            this.session.irisSeqId = irisMatch[1];
+ 
+          // Extract iris sequence ID if available (tries all known response formats)
+          const extractedSeqId = extractIrisSeqId(html);
+          if (extractedSeqId) {
+            this.session.irisSeqId = extractedSeqId;
             logger.info('Auto-refreshed iris sequence ID');
+          } else {
+            logger.warn('Could not extract iris sequence ID from refreshed HTML');
           }
         }
       } catch (tokenError) {
         logger.warn('Failed to auto-refresh tokens, continuing with existing tokens', tokenError);
       }
-
+ 
       // Save if path is set
       if (this.sessionPath) {
         await this.saveSession();
       }
-
+ 
       logger.info('Session refreshed successfully');
       return true;
     } catch (error) {
@@ -224,7 +229,7 @@ export class SessionManager {
       return false;
     }
   }
-
+ 
   /**
    * Save session to file
    */
@@ -232,7 +237,7 @@ export class SessionManager {
     if (!this.sessionPath || !this.session) {
       return;
     }
-
+ 
     try {
       const appState: AppState = {
         cookies: this.session.cookies,
@@ -243,14 +248,14 @@ export class SessionManager {
         deviceId: this.session.deviceId,
         irisSeqId: this.session.irisSeqId,
       };
-
+ 
       await writeFile(this.sessionPath, JSON.stringify(appState, null, 2));
       logger.debug('Session saved to file');
     } catch (error) {
       logger.error('Failed to save session', error);
     }
   }
-
+ 
   /**
    * Load session from file
    */
@@ -258,7 +263,7 @@ export class SessionManager {
     if (!this.sessionPath) {
       return null;
     }
-
+ 
     try {
       // Check if file exists
       await access(this.sessionPath);
@@ -274,19 +279,19 @@ export class SessionManager {
       return null;
     }
   }
-
+ 
   /**
    * Clear the current session
    */
   async clearSession(): Promise<void> {
     logger.info('Clearing session');
-
+ 
     this.stopAutoRefresh();
     this.session = null;
     
     // Clear cookie jar
     await this.cookieJar.removeAllCookies();
-
+ 
     // Delete session file if exists
     if (this.sessionPath) {
       try {
@@ -297,26 +302,26 @@ export class SessionManager {
       }
     }
   }
-
+ 
   /**
    * Get the cookie jar
    */
   getCookieJar(): CookieJar {
     return this.cookieJar;
   }
-
+ 
   /**
    * Sync session cookies to cookie jar
    */
   private async syncCookiesToJar(): Promise<void> {
     if (!this.session) return;
-
+ 
     for (const cookie of this.session.cookies) {
       const cookieStr = `${cookie.key}=${cookie.value}; Domain=${cookie.domain}; Path=${cookie.path}`;
       await this.cookieJar.setCookie(cookieStr, 'https://www.facebook.com');
     }
   }
-
+ 
   /**
    * Start auto-refresh intervals
    */
@@ -325,7 +330,7 @@ export class SessionManager {
     this.refreshInterval = setInterval(async () => {
       await this.refreshSession();
     }, SESSION_SETTINGS.refreshInterval);
-
+ 
     // Validation interval
     this.validationInterval = setInterval(async () => {
       const result = await this.validateSession();
@@ -334,7 +339,7 @@ export class SessionManager {
       }
     }, SESSION_SETTINGS.validityCheckInterval);
   }
-
+ 
   /**
    * Stop auto-refresh intervals
    */
@@ -348,13 +353,13 @@ export class SessionManager {
       this.validationInterval = undefined;
     }
   }
-
+ 
   /**
    * Get session as AppState
    */
   getAppState(): AppState | null {
     if (!this.session) return null;
-
+ 
     return {
       cookies: this.session.cookies,
       fbDtsg: this.session.fbDtsg,
