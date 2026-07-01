@@ -5,6 +5,18 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-07-01
+
+### Fixed
+
+- **Message Sending Data Structure** (`src/messaging/MessageSender.ts`)
+  - Fixed message sending by updating GraphQL mutation data structure to match Facebook's expected format
+  - Wrapped message data in `message` object with proper fields: `text`, `metadata_sender_id`, `thread_id`
+  - Added `clientId` field for message tracking
+  - Changed from flat structure to nested message object structure
+  - Fixes issue where messages could not be sent to group chats
+  - Ensures compatibility with Facebook's webgraphql/query endpoint for personal accounts
+
 ## [1.0.6] - 2026-02-11
 
 ### Fixed

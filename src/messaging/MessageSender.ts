@@ -70,19 +70,22 @@ export class MessageSender {
     const { threadId, options, userId } = params;
 
     const data: Record<string, unknown> = {
-      thread_id: threadId,
-      body: options.body || '',
-      author: userId,
+      message: {
+        text: options.body || '',
+        metadata_sender_id: userId,
+        thread_id: threadId,
+      },
+      clientId: `client_${Date.now()}`,
     };
 
     // Add reply reference
     if (options.replyToMessage) {
-      data.replied_to_message_id = options.replyToMessage;
+      (data.message as Record<string, unknown>).replied_to_message_id = options.replyToMessage;
     }
 
     // Add mentions
     if (options.mentions && options.mentions.length > 0) {
-      data.mentions = options.mentions.map((m) => ({
+      (data.message as Record<string, unknown>).mentions = options.mentions.map((m) => ({
         id: m.id,
         offset: m.offset,
         length: m.length,
@@ -91,7 +94,7 @@ export class MessageSender {
 
     // Add attachments
     if (options.attachments && options.attachments.length > 0) {
-      data.attachments = options.attachments.map((att) => {
+      (data.message as Record<string, unknown>).attachments = options.attachments.map((att) => {
         if (typeof att === 'string') {
           return { id: att };
         }
@@ -104,18 +107,18 @@ export class MessageSender {
 
     // Add sticker
     if (options.sticker) {
-      data.sticker_id = options.sticker;
+      (data.message as Record<string, unknown>).sticker_id = options.sticker;
     }
 
     // Add emoji
     if (options.emoji) {
-      data.emoji = options.emoji;
-      data.emoji_size = options.emojiSize || 'medium';
+      (data.message as Record<string, unknown>).emoji = options.emoji;
+      (data.message as Record<string, unknown>).emoji_size = options.emojiSize || 'medium';
     }
 
     // Silent message
     if (options.isSilent) {
-      data.is_silent = true;
+      (data.message as Record<string, unknown>).is_silent = true;
     }
 
     return data;

@@ -204,6 +204,7 @@ export class GraphQLClient {
 
   /**
    * Make a GraphQL mutation
+   * Uses /webgraphql/query endpoint for personal Facebook accounts (same as queries)
    */
   async mutation<T = unknown>(
     mutationName: string,
