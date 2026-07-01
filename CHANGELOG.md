@@ -5,6 +5,88 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-01
+
+### Changed
+
+#### Real Facebook API Endpoints (Full Implementation Refactor)
+
+- **MessageSender** (`src/messaging/MessageSender.ts`)
+  - Replaced fake `MessageSendMutation` GraphQL call with real `POST /messaging/send/`
+  - Added `offline_threading_id` using 64-bit BigInt: `(Date.now() << 22n) | random22bits`
+  - Added `client_mutation_id`, `author=fbid:<userId>`, `source=source:chat:web`, `action_type=ma-type:user-generated-message` to every send request
+  - Uses `thread_fbid` for group threads and `other_user_fbid` for 1-1 conversations
+  - `sendTypingIndicator()` now uses real `POST /ajax/messaging/typ.php`
+  - `markAsRead()` now uses real `POST /ajax/mercury/change_read_status.php`
+  - `markAsDelivered()` now uses real `POST /ajax/mercury/delivery_receipts.php`
+  - `unsendMessage()` now uses real `POST /messaging/unsend_message/`
+  - `reactToMessage()` now uses real `POST /messaging/message_reactions/` with actual emoji strings
+
+- **ThreadManager** (`src/threads/ThreadManager.ts`)
+  - Replaced all fake `*Mutation` GraphQL names with real form-encoded endpoints
+  - `getThreadList()` → `POST /ajax/mercury/threadlist_info.php`
+  - `getThreadInfo()` → `POST /ajax/mercury/thread_info.php`
+  - `getThreadHistory()` → `POST /ajax/mercury/conversation_info.php`
+  - `createGroup()` → `POST /messaging/new_group_thread/`
+  - `addParticipants()` → `POST /messaging/add_participants/`
+  - `removeParticipants()` → `POST /messaging/remove_participant/` (per user)
+  - `promoteParticipants()` / `demoteParticipants()` → `POST /messaging/update_thread_admins/`
+  - `setNickname()` → `POST /messaging/set_nickname/`
+  - `changeThreadColor()` / `changeThreadEmoji()` → `POST /messaging/set_thread_settings/`
+  - `changeThreadName()` → `POST /messaging/set_thread_name/`
+  - `leaveGroup()` → `POST /ajax/leave_group/`
+  - `archiveThread()` → `POST /ajax/mercury/move_thread.php`
+  - `muteThread()` → `POST /ajax/mercury/change_mute_thread.php`
+  - `deleteThread()` → `POST /ajax/mercury/delete_thread.php`
+  - `pinMessage()` → `POST /messaging/pin_message/`
+  - `unpinMessage()` → `POST /messaging/unpin_message/`
+
+- **MediaUploader** (`src/media/MediaUploader.ts`)
+  - Replaced fake `ImageUploadMutation` / `VideoUploadMutation` / `AudioUploadMutation` / `DocumentUploadMutation`
+  - All uploads now use real multipart `POST https://upload.facebook.com/ajax/mercury/upload.php`
+  - Files sent as actual binary `multipart/form-data` (not base64 strings)
+  - Response parsing handles Facebook's `for(;;);` JSON prefix
+  - Attachment IDs extracted from real `payload.metadata[].image_id` / `video_id` / `audio_id` / `file_id`
+
+- **EventParser** (`src/events/EventParser.ts`)
+  - Added binary payload support: tries plain JSON → zlib inflate → raw deflate → stripped prefix
+  - Added `UnsendMessage` delta class parsing
+  - Added `ReadReceipt` and `DeliveryReceipt` delta class dispatching by class name
+  - Added `AdminText` delta parsing (renames, participant add/remove inside `/t_ms`)
+  - Added `/t_notify` topic handler
+  - Typing events now extracted from both `/t_tn` and inline deltas inside `/t_ms`
+  - Presence parsing handles both single-user objects and bulk presence maps (`{ "<uid>": { "p": 2, "lat": ... } }`)
+  - `extractThreadId()` now handles all four field variants: `threadFbId`, `thread_fbid`, `otherUserFbId`, `other_user_fbid`
+
+- **GraphQLClient** (`src/api/GraphQLClient.ts`)
+  - Added `formPost<T>(url, params)` — generic helper for form-encoded non-GraphQL endpoints
+  - Added `buildBaseParams()` — returns `fb_dtsg`, `__a`, `__user`, `__req`, `jazoest` for reuse by all managers
+  - Made `encodeFormData()` public so managers can compose payloads independently
+
+- **UserManager** (`src/users/UserManager.ts`)
+  - `getUserInfo()` now uses real `POST /chat/user_info/` Mercury endpoint
+  - `searchUsers()` now uses real `POST /ajax/typeahead/search.php`
+  - `sendFriendRequest()` / `acceptFriendRequest()` / `declineFriendRequest()` / `cancelFriendRequest()` now use `POST /ajax/add_friend/action.php`
+  - `unfriend()` now uses `POST /ajax/friends/lists/remove.php`
+
+- **PanindiganFCA** (`src/core/PanindiganFCA.ts`)
+  - `MessageSender`, `ThreadManager`, `UserManager`, `MediaUploader` are now singleton instances created once in the constructor
+  - Removed all ~30 per-call `await import(...)` dynamic imports
+  - `reactToMessage()` now delegates to `MessageSender.reactToMessage()` with real emoji strings via `REACTION_EMOJIS`
+  - `unsendMessage()` delegates to `MessageSender.unsendMessage()`
+  - `markAsRead()` delegates to `MessageSender.markAsRead()`
+  - `sendTypingIndicator()` delegates to `MessageSender.sendTypingIndicator()`
+  - `handleMQTTMessage()` forwards raw Buffer directly to EventParser (supports binary payloads)
+
+- **Helpers** (`src/utils/Helpers.ts`)
+  - Added `generateOfflineThreadingId()` — `(BigInt(Date.now()) << 22n) | BigInt(random22bits)`
+  - Added `generateClientMutationId()` — monotonically incrementing integer per process lifetime
+  - Added `parseFacebookResponse<T>()` — strips `for(;;);` prefix and JSON-parses
+
+- **Constants** (`src/utils/Constants.ts`)
+  - Added all real Facebook messaging endpoint URLs as named exports
+  - Added `GRAPHQL_DOC_IDS` registry for known GraphQL document IDs
+
 ## [1.1.1] - 2026-07-02
 
 ### Fixed

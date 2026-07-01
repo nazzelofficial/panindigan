@@ -1,9 +1,11 @@
 /**
  * Media Uploader for Panindigan
- * Handles file uploads to Facebook
+ * Uploads files to Facebook via real multipart POST to upload.facebook.com
  */
 
 import { logger } from '../utils/Logger.js';
+import { FACEBOOK_UPLOAD_URL } from '../utils/Constants.js';
+import { getMimeTypeFromExtension, parseFacebookResponse } from '../utils/Helpers.js';
 import type { GraphQLClient } from '../api/GraphQLClient.js';
 import type {
   UploadResult,
@@ -15,6 +17,29 @@ import type {
   DownloadOptions,
 } from '../types/index.js';
 
+/**
+ * Facebook upload response shape
+ */
+interface UploadResponse {
+  payload?: {
+    metadata?: Array<{
+      image_id?: string;
+      video_id?: string;
+      audio_id?: string;
+      file_id?: string;
+      filename?: string;
+      filetype?: string;
+      filesize?: number;
+      width?: number;
+      height?: number;
+      duration?: number;
+    }>;
+  };
+  error?: number;
+  errorSummary?: string;
+  errorDescription?: string;
+}
+
 export class MediaUploader {
   private graphqlClient: GraphQLClient;
 
@@ -23,183 +48,169 @@ export class MediaUploader {
   }
 
   /**
-   * Upload an image
+   * Upload an image via multipart POST to upload.facebook.com
    */
   async uploadImage(buffer: Buffer, options?: ImageUploadOptions): Promise<UploadResult> {
-    logger.debug('Uploading image', { size: buffer.length, options });
-    
-    const result = await this.graphqlClient.mutation<{
-      upload_image: {
-        attachment: {
-          id: string;
-          mime_type: string;
-          filename: string;
-          size: number;
-          width?: number;
-          height?: number;
-        };
-      };
-    }>('ImageUploadMutation', {
-      buffer: buffer.toString('base64'),
-      filename: options?.filename || 'image.jpg',
-      mime_type: options?.mimeType || 'image/jpeg',
-      width: options?.width,
-      height: options?.height,
-      quality: options?.quality,
-    });
-    
-    return {
-      attachmentId: result?.upload_image?.attachment?.id || `img_${Date.now()}`,
-      mimeType: result?.upload_image?.attachment?.mime_type || 'image/jpeg',
-      filename: result?.upload_image?.attachment?.filename || 'image.jpg',
-      size: result?.upload_image?.attachment?.size || buffer.length,
-      width: result?.upload_image?.attachment?.width,
-      height: result?.upload_image?.attachment?.height,
-    };
+    const filename = options?.filename || 'image.jpg';
+    const mimeType = options?.mimeType || getMimeTypeFromExtension(filename) || 'image/jpeg';
+
+    logger.debug('Uploading image', { filename, size: buffer.length });
+    return this.upload(buffer, filename, mimeType);
   }
 
   /**
-   * Upload a video
+   * Upload a video via multipart POST to upload.facebook.com
    */
   async uploadVideo(buffer: Buffer, options?: VideoUploadOptions): Promise<UploadResult> {
-    logger.debug('Uploading video', { size: buffer.length, options });
-    
-    const result = await this.graphqlClient.mutation<{
-      upload_video: {
-        attachment: {
-          id: string;
-          mime_type: string;
-          filename: string;
-          size: number;
-          duration?: number;
-        };
-      };
-    }>('VideoUploadMutation', {
-      buffer: buffer.toString('base64'),
-      filename: options?.filename || 'video.mp4',
-      mime_type: options?.mimeType || 'video/mp4',
-      thumbnail: options?.thumbnail?.toString('base64'),
-    });
-    
-    return {
-      attachmentId: result?.upload_video?.attachment?.id || `vid_${Date.now()}`,
-      mimeType: result?.upload_video?.attachment?.mime_type || 'video/mp4',
-      filename: result?.upload_video?.attachment?.filename || 'video.mp4',
-      size: result?.upload_video?.attachment?.size || buffer.length,
-      duration: result?.upload_video?.attachment?.duration,
-    };
+    const filename = options?.filename || 'video.mp4';
+    const mimeType = options?.mimeType || getMimeTypeFromExtension(filename) || 'video/mp4';
+
+    logger.debug('Uploading video', { filename, size: buffer.length });
+    return this.upload(buffer, filename, mimeType);
   }
 
   /**
-   * Upload an audio file
+   * Upload an audio file via multipart POST to upload.facebook.com
    */
   async uploadAudio(buffer: Buffer, options?: AudioUploadOptions): Promise<UploadResult> {
-    logger.debug('Uploading audio', { size: buffer.length, options });
-    
-    const result = await this.graphqlClient.mutation<{
-      upload_audio: {
-        attachment: {
-          id: string;
-          mime_type: string;
-          filename: string;
-          size: number;
-          duration?: number;
-        };
-      };
-    }>('AudioUploadMutation', {
-      buffer: buffer.toString('base64'),
-      filename: options?.filename || 'audio.mp3',
-      mime_type: options?.mimeType || 'audio/mpeg',
-      is_voice_mail: options?.isVoiceMail || false,
-    });
-    
+    const filename = options?.filename || 'audio.mp3';
+    const mimeType = options?.mimeType || getMimeTypeFromExtension(filename) || 'audio/mpeg';
+
+    logger.debug('Uploading audio', { filename, size: buffer.length });
+    return this.upload(buffer, filename, mimeType);
+  }
+
+  /**
+   * Upload a document via multipart POST to upload.facebook.com
+   */
+  async uploadDocument(
+    buffer: Buffer,
+    options: DocumentUploadOptions
+  ): Promise<UploadResult> {
+    const filename = options?.filename || 'document.pdf';
+    const mimeType =
+      options?.mimeType || getMimeTypeFromExtension(filename) || 'application/pdf';
+
+    logger.debug('Uploading document', { filename, size: buffer.length });
+    return this.upload(buffer, filename, mimeType);
+  }
+
+  /**
+   * Core upload routine.
+   * Builds a multipart/form-data request with the file and base auth params,
+   * then POSTs to https://upload.facebook.com/ajax/mercury/upload.php.
+   */
+  private async upload(
+    buffer: Buffer,
+    filename: string,
+    mimeType: string
+  ): Promise<UploadResult> {
+    const baseParams = this.graphqlClient.buildBaseParams();
+    const requestHandler = this.graphqlClient.getRequestHandler();
+
+    // Use the built-in Node.js 22 FormData + Blob
+    const form = new FormData();
+
+    // File field name used by Messenger web: files[upload_0]
+    form.append(
+      'files[upload_0]',
+      new Blob([new Uint8Array(buffer)], { type: mimeType }),
+      filename
+    );
+
+    // Auth / session params
+    for (const [key, value] of Object.entries(baseParams)) {
+      form.append(key, value);
+    }
+
+    const response = await requestHandler.post(FACEBOOK_UPLOAD_URL, form);
+
+    const text = await response.text();
+
+    let data: UploadResponse;
+    try {
+      data = parseFacebookResponse<UploadResponse>(text);
+    } catch {
+      throw new Error(
+        `MediaUploader: failed to parse upload response: ${text.substring(0, 200)}`
+      );
+    }
+
+    if (data.error) {
+      throw new Error(
+        data.errorDescription ||
+          data.errorSummary ||
+          `Upload failed with error code ${data.error}`
+      );
+    }
+
+    const meta = data?.payload?.metadata?.[0] || {};
+
+    // Facebook returns different ID fields depending on the file type
+    const attachmentId =
+      meta.image_id ||
+      meta.video_id ||
+      meta.audio_id ||
+      meta.file_id ||
+      `upload_${Date.now()}`;
+
     return {
-      attachmentId: result?.upload_audio?.attachment?.id || `aud_${Date.now()}`,
-      mimeType: result?.upload_audio?.attachment?.mime_type || 'audio/mpeg',
-      filename: result?.upload_audio?.attachment?.filename || 'audio.mp3',
-      size: result?.upload_audio?.attachment?.size || buffer.length,
-      duration: result?.upload_audio?.attachment?.duration,
+      attachmentId,
+      mimeType: meta.filetype || mimeType,
+      filename: meta.filename || filename,
+      size: meta.filesize || buffer.length,
+      width: meta.width,
+      height: meta.height,
+      duration: meta.duration,
     };
   }
 
   /**
-   * Upload a document
+   * Download an attachment via authenticated GET
    */
-  async uploadDocument(buffer: Buffer, options: DocumentUploadOptions): Promise<UploadResult> {
-    logger.debug('Uploading document', { size: buffer.length, options });
-    
-    const result = await this.graphqlClient.mutation<{
-      upload_document: {
-        attachment: {
-          id: string;
-          mime_type: string;
-          filename: string;
-          size: number;
-        };
-      };
-    }>('DocumentUploadMutation', {
-      buffer: buffer.toString('base64'),
-      filename: options?.filename || 'document.pdf',
-      mime_type: options?.mimeType || 'application/pdf',
-    });
-    
-    return {
-      attachmentId: result?.upload_document?.attachment?.id || `doc_${Date.now()}`,
-      mimeType: result?.upload_document?.attachment?.mime_type || 'application/pdf',
-      filename: result?.upload_document?.attachment?.filename || 'document.pdf',
-      size: result?.upload_document?.attachment?.size || buffer.length,
-    };
-  }
+  async downloadAttachment(
+    url: string,
+    options?: DownloadOptions
+  ): Promise<DownloadResult> {
+    logger.debug('Downloading attachment', { url: url.substring(0, 100) });
 
-  /**
-   * Download an attachment
-   */
-  async downloadAttachment(url: string, options?: DownloadOptions): Promise<DownloadResult> {
-    logger.debug('Downloading attachment', { url, options });
-    
     if (!url) {
       throw new Error('Attachment URL is required');
     }
 
     try {
-      // Get RequestHandler from GraphQL client
       const requestHandler = this.graphqlClient.getRequestHandler();
-      
-      // Use RequestHandler to fetch the attachment
       const response = await requestHandler.get(url);
-      
+
       if (!response.ok) {
-        throw new Error(`Failed to download attachment: ${response.status} ${response.statusText}`);
+        throw new Error(
+          `Failed to download attachment: ${response.status} ${response.statusText}`
+        );
       }
 
-      // Get content type from response headers
-      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      const contentType =
+        response.headers.get('content-type') || 'application/octet-stream';
 
-      // Extract filename from Content-Disposition header if available
       let filename = options?.filename;
       const contentDisposition = response.headers.get('content-disposition');
       if (!filename && contentDisposition) {
-        const match = contentDisposition.match(/filename=([^;]+)/);
-        if (match && match[1]) {
-          filename = match[1].replace(/['"]/g, '').trim();
+        const match = contentDisposition.match(/filename="?([^";\r\n]+)"?/);
+        if (match?.[1]) {
+          filename = match[1].trim();
         }
       }
-      
-      // Fallback filename
       if (!filename) {
-        const urlParts = new URL(url).pathname.split('/');
-        filename = urlParts[urlParts.length - 1] || 'attachment';
+        const parts = new URL(url).pathname.split('/');
+        filename = parts[parts.length - 1] || 'attachment';
       }
 
-      // Get buffer from response
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
 
-      logger.debug('Attachment downloaded successfully', { 
-        url: url.substring(0, 100), 
-        size: buffer.length, 
+      logger.debug('Attachment downloaded', {
         filename,
-        contentType 
+        size: buffer.length,
+        contentType,
       });
 
       return {
@@ -209,9 +220,9 @@ export class MediaUploader {
         size: buffer.length,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logger.error('Failed to download attachment', { url, error: message });
-      throw new Error(`Failed to download attachment: ${message}`);
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to download attachment', { url, error: msg });
+      throw new Error(`Failed to download attachment: ${msg}`);
     }
   }
 }

@@ -8,6 +8,37 @@ export const FACEBOOK_WEBGRAPHQL_URL = 'https://www.facebook.com/webgraphql/quer
 export const FACEBOOK_BATCH_URL = 'https://www.facebook.com/webgraphqlbatch';
 export const FACEBOOK_UPLOAD_URL = 'https://upload.facebook.com/ajax/mercury/upload.php';
 
+// Messenger REST endpoints (stable form-encoded POST endpoints)
+export const FACEBOOK_SEND_URL = 'https://www.facebook.com/messaging/send/';
+export const FACEBOOK_UNSEND_URL = 'https://www.facebook.com/messaging/unsend_message/';
+export const FACEBOOK_REACTION_URL = 'https://www.facebook.com/messaging/message_reactions/';
+export const FACEBOOK_TYPING_URL = 'https://www.facebook.com/ajax/messaging/typ.php';
+export const FACEBOOK_MARK_READ_URL = 'https://www.facebook.com/ajax/mercury/change_read_status.php';
+export const FACEBOOK_MARK_DELIVERED_URL = 'https://www.facebook.com/ajax/mercury/delivery_receipts.php';
+export const FACEBOOK_THREAD_LIST_URL = 'https://www.facebook.com/ajax/mercury/threadlist_info.php';
+export const FACEBOOK_THREAD_INFO_URL = 'https://www.facebook.com/ajax/mercury/thread_info.php';
+export const FACEBOOK_THREAD_HISTORY_URL = 'https://www.facebook.com/ajax/mercury/conversation_info.php';
+export const FACEBOOK_SET_NICKNAME_URL = 'https://www.facebook.com/messaging/set_nickname/';
+export const FACEBOOK_SET_THREAD_NAME_URL = 'https://www.facebook.com/messaging/set_thread_name/';
+export const FACEBOOK_SET_THREAD_IMAGE_URL = 'https://www.facebook.com/messaging/set_thread_image/';
+export const FACEBOOK_SET_THREAD_SETTINGS_URL = 'https://www.facebook.com/messaging/set_thread_settings/';
+export const FACEBOOK_ADD_PARTICIPANTS_URL = 'https://www.facebook.com/messaging/add_participants/';
+export const FACEBOOK_REMOVE_PARTICIPANT_URL = 'https://www.facebook.com/messaging/remove_participant/';
+export const FACEBOOK_LEAVE_GROUP_URL = 'https://www.facebook.com/ajax/leave_group/';
+export const FACEBOOK_UPDATE_ADMINS_URL = 'https://www.facebook.com/messaging/update_thread_admins/';
+export const FACEBOOK_NEW_GROUP_URL = 'https://www.facebook.com/messaging/new_group_thread/';
+export const FACEBOOK_CREATE_POLL_URL = 'https://www.facebook.com/messaging/create_poll/';
+export const FACEBOOK_UPDATE_POLL_URL = 'https://www.facebook.com/messaging/update_vote/';
+export const FACEBOOK_PIN_MESSAGE_URL = 'https://www.facebook.com/messaging/pin_message/';
+export const FACEBOOK_UNPIN_MESSAGE_URL = 'https://www.facebook.com/messaging/unpin_message/';
+export const FACEBOOK_ARCHIVE_THREAD_URL = 'https://www.facebook.com/ajax/mercury/move_thread.php';
+export const FACEBOOK_MUTE_THREAD_URL = 'https://www.facebook.com/ajax/mercury/change_mute_thread.php';
+export const FACEBOOK_DELETE_THREAD_URL = 'https://www.facebook.com/ajax/mercury/delete_thread.php';
+export const FACEBOOK_USER_INFO_URL = 'https://www.facebook.com/chat/user_info/';
+export const FACEBOOK_SEARCH_URL = 'https://www.facebook.com/ajax/typeahead/search.php';
+export const FACEBOOK_FRIEND_REQUEST_URL = 'https://www.facebook.com/ajax/add_friend/action.php';
+export const FACEBOOK_MANAGE_FRIEND_URL = 'https://www.facebook.com/ajax/friends/lists/remove.php';
+
 // MQTT Configuration
 export const MQTT_BROKER_URLS = [
   'wss://edge-chat.facebook.com/chat',
@@ -43,29 +74,33 @@ export const DEFAULT_HEADERS: Record<string, string> = {
   'User-Agent': DEFAULT_USER_AGENT,
 };
 
-// GraphQL Queries
+// GraphQL Document IDs (Facebook's internal query registry)
+export const GRAPHQL_DOC_IDS = {
+  THREAD_LIST: '3336396659756583',
+  THREAD_INFO: '4637567869602765',
+  THREAD_HISTORY: '1547392735427520',
+  USER_INFO: '4003363196376948',
+  SEARCH_USERS: '2786954668004889',
+  FRIENDS_LIST: '3827522300624639',
+  MARK_READ: '5765950230143565',
+  UNSEND_MESSAGE: '2974122252636166',
+} as const;
+
+// GraphQL Queries (legacy names kept for compatibility)
 export const GRAPHQL_QUERIES = {
-  // Thread queries
   GET_THREAD_LIST: 'ThreadListQuery',
   GET_THREAD_INFO: 'ThreadInfoQuery',
   GET_THREAD_HISTORY: 'ThreadHistoryQuery',
-  
-  // Message queries
   SEND_MESSAGE: 'MessageSendMutation',
   UNSEND_MESSAGE: 'MessageUnsendMutation',
   EDIT_MESSAGE: 'MessageEditMutation',
-  
-  // User queries
   GET_USER_INFO: 'UserInfoQuery',
   SEARCH_USERS: 'UserSearchQuery',
-  
-  // Attachment queries
   UPLOAD_ATTACHMENT: 'AttachmentUploadMutation',
 } as const;
 
 // Error Codes
 export const ERROR_CODES = {
-  // Authentication errors
   LOGIN_FAILED: 'LOGIN_FAILED',
   INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',
   CHECKPOINT_REQUIRED: 'CHECKPOINT_REQUIRED',
@@ -73,31 +108,21 @@ export const ERROR_CODES = {
   CAPTCHA_REQUIRED: 'CAPTCHA_REQUIRED',
   SESSION_EXPIRED: 'SESSION_EXPIRED',
   INVALID_APPSTATE: 'INVALID_APPSTATE',
-  
-  // API errors
   API_ERROR: 'API_ERROR',
   RATE_LIMITED: 'RATE_LIMITED',
   NETWORK_ERROR: 'NETWORK_ERROR',
   TIMEOUT_ERROR: 'TIMEOUT_ERROR',
   GRAPHQL_ERROR: 'GRAPHQL_ERROR',
-  
-  // Message errors
   MESSAGE_SEND_FAILED: 'MESSAGE_SEND_FAILED',
   MESSAGE_NOT_FOUND: 'MESSAGE_NOT_FOUND',
   INVALID_ATTACHMENT: 'INVALID_ATTACHMENT',
   UPLOAD_FAILED: 'UPLOAD_FAILED',
-  
-  // Thread errors
   THREAD_NOT_FOUND: 'THREAD_NOT_FOUND',
   NOT_GROUP_ADMIN: 'NOT_GROUP_ADMIN',
   PARTICIPANT_NOT_FOUND: 'PARTICIPANT_NOT_FOUND',
-  
-  // User errors
   USER_NOT_FOUND: 'USER_NOT_FOUND',
   FRIEND_REQUEST_FAILED: 'FRIEND_REQUEST_FAILED',
   BLOCK_FAILED: 'BLOCK_FAILED',
-  
-  // MQTT errors
   MQTT_CONNECTION_FAILED: 'MQTT_CONNECTION_FAILED',
   MQTT_DISCONNECTED: 'MQTT_DISCONNECTED',
   MQTT_PUBLISH_FAILED: 'MQTT_PUBLISH_FAILED',
@@ -163,11 +188,11 @@ export const REACTION_IDS: Record<string, number> = {
 
 // File size limits (in bytes)
 export const FILE_SIZE_LIMITS = {
-  image: 25 * 1024 * 1024,      // 25MB
-  video: 25 * 1024 * 1024,      // 25MB
-  audio: 25 * 1024 * 1024,      // 25MB
-  document: 25 * 1024 * 1024,   // 25MB
-  total: 25 * 1024 * 1024,      // 25MB per message
+  image: 25 * 1024 * 1024,
+  video: 25 * 1024 * 1024,
+  audio: 25 * 1024 * 1024,
+  document: 25 * 1024 * 1024,
+  total: 25 * 1024 * 1024,
 };
 
 // Allowed MIME types
@@ -192,7 +217,7 @@ export const ALLOWED_MIME_TYPES = {
 // Rate limiting
 export const RATE_LIMITS = {
   messages: {
-    windowMs: 60000,  // 1 minute
+    windowMs: 60000,
     maxRequests: 100,
   },
   api: {
@@ -216,8 +241,8 @@ export const RECONNECTION_SETTINGS = {
 
 // Session settings
 export const SESSION_SETTINGS = {
-  refreshInterval: 15 * 60 * 1000,  // 15 minutes (optimized)
-  validityCheckInterval: 3 * 60 * 1000,  // 3 minutes (optimized)
+  refreshInterval: 15 * 60 * 1000,
+  validityCheckInterval: 3 * 60 * 1000,
 };
 
 // Anti-Suspension settings
@@ -238,5 +263,5 @@ export const FAST_MQTT_SETTINGS = {
   healthCheckInterval: 30000,
   connectionTimeout: 60000,
   maxReconnectDelay: 60000,
-  staleConnectionThreshold: 300000,  // 5 minutes
+  staleConnectionThreshold: 300000,
 };

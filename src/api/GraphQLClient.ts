@@ -3,14 +3,18 @@
  */
 
 import { logger } from '../utils/Logger.js';
-import { FACEBOOK_WEBGRAPHQL_URL, FACEBOOK_BATCH_URL, ERROR_CODES } from '../utils/Constants.js';
+import {
+  FACEBOOK_WEBGRAPHQL_URL,
+  FACEBOOK_BATCH_URL,
+  ERROR_CODES,
+} from '../utils/Constants.js';
 import { generateReqParam, generateRandomString } from '../utils/Helpers.js';
 import type { RequestHandler } from './RequestHandler.js';
-import type { 
-  GraphQLResponse, 
-  BatchRequest, 
+import type {
+  GraphQLResponse,
+  BatchRequest,
   BatchResponse,
-  FacebookFormData 
+  FacebookFormData,
 } from '../types/index.js';
 
 export class GraphQLClient {
@@ -39,6 +43,68 @@ export class GraphQLClient {
   }
 
   /**
+   * Build the standard base parameters used in all Facebook form requests.
+   */
+  buildBaseParams(): Record<string, string> {
+    return {
+      fb_dtsg: this.fbDtsg,
+      __a: '1',
+      __user: this.userId,
+      __req: generateReqParam(),
+      jazoest: this.generateJazoest(),
+    };
+  }
+
+  /**
+   * POST a form-encoded request to any Facebook endpoint.
+   * Handles the for(;;); prefix stripping automatically.
+   */
+  async formPost<T = unknown>(
+    url: string,
+    params: Record<string, string>
+  ): Promise<T> {
+    const payload: Record<string, string> = {
+      ...this.buildBaseParams(),
+      ...params,
+    };
+
+    logger.debug(`formPost → ${url}`, Object.keys(params));
+
+    const response = await this.requestHandler.post(
+      url,
+      this.encodeFormData(payload)
+    );
+
+    const text = await response.text();
+    const jsonStr = text.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(jsonStr);
+    } catch {
+      throw this.createGraphQLError(
+        ERROR_CODES.API_ERROR,
+        `Failed to parse response from ${url}: ${text.substring(0, 200)}`,
+        0
+      );
+    }
+
+    if (data.error) {
+      throw this.createGraphQLError(
+        ERROR_CODES.API_ERROR,
+        String(
+          (data as Record<string, unknown>).errorDescription ||
+            (data as Record<string, unknown>).errorSummary ||
+            data.error
+        ),
+        Number(data.error)
+      );
+    }
+
+    return data as T;
+  }
+
+  /**
    * Make a single GraphQL query
    */
   async query<T = unknown>(
@@ -47,7 +113,7 @@ export class GraphQLClient {
     queryDoc?: string
   ): Promise<T> {
     const formData = this.buildFormData();
-    
+
     const payload: Record<string, string> = {
       av: this.userId,
       __user: this.userId,
@@ -77,8 +143,11 @@ export class GraphQLClient {
 
     logger.debug(`GraphQL Query: ${queryName}`, variables);
 
-    const response = await this.requestHandler.post(FACEBOOK_WEBGRAPHQL_URL, this.encodeFormData(payload));
-    
+    const response = await this.requestHandler.post(
+      FACEBOOK_WEBGRAPHQL_URL,
+      this.encodeFormData(payload)
+    );
+
     if (!response.ok) {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
@@ -88,14 +157,14 @@ export class GraphQLClient {
     }
 
     const text = await response.text();
-    
+
     // Facebook returns JSON with a for-loop prefix that needs to be stripped
     const jsonStr = text.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
-    
+
     let data: GraphQLResponse<T>;
     try {
       data = JSON.parse(jsonStr);
-    } catch (e) {
+    } catch {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         'Failed to parse GraphQL response',
@@ -132,7 +201,7 @@ export class GraphQLClient {
    */
   async batchQuery(batch: BatchRequest): Promise<BatchResponse> {
     const MAX_BATCH_SIZE = 50; // Facebook's recommended batch size
-    
+
     if (batch.queries.length <= MAX_BATCH_SIZE) {
       return this.executeBatch(batch);
     }
@@ -145,11 +214,15 @@ export class GraphQLClient {
       });
     }
 
-    logger.debug(`Splitting ${batch.queries.length} queries into ${chunks.length} batches`);
+    logger.debug(
+      `Splitting ${batch.queries.length} queries into ${chunks.length} batches`
+    );
 
     // Execute all batches in parallel
-    const results = await Promise.all(chunks.map(chunk => this.executeBatch(chunk)));
-    
+    const results = await Promise.all(
+      chunks.map((chunk) => this.executeBatch(chunk))
+    );
+
     // Combine results
     const allResponses: BatchResponse['responses'] = [];
     for (const result of results) {
@@ -164,7 +237,7 @@ export class GraphQLClient {
    */
   private async executeBatch(batch: BatchRequest): Promise<BatchResponse> {
     const formData = this.buildFormData();
-    
+
     const payload: Record<string, string> = {
       av: this.userId,
       __user: this.userId,
@@ -193,10 +266,15 @@ export class GraphQLClient {
       });
     });
 
-    logger.debug(`GraphQL Batch: ${batch.queries.map(q => q.name).join(', ')}`);
+    logger.debug(
+      `GraphQL Batch: ${batch.queries.map((q) => q.name).join(', ')}`
+    );
 
-    const response = await this.requestHandler.post(FACEBOOK_BATCH_URL, this.encodeFormData(payload));
-    
+    const response = await this.requestHandler.post(
+      FACEBOOK_BATCH_URL,
+      this.encodeFormData(payload)
+    );
+
     if (!response.ok) {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
@@ -207,11 +285,11 @@ export class GraphQLClient {
 
     const text = await response.text();
     const jsonStr = text.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
-    
+
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(jsonStr);
-    } catch (e) {
+    } catch {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         'Failed to parse batch response',
@@ -221,24 +299,26 @@ export class GraphQLClient {
     }
 
     // Parse responses with error handling per query
-    const responses: BatchResponse['responses'] = batch.queries.map((q, index) => {
-      const key = `q${index}`;
-      const responseData = data[key] as GraphQLResponse<unknown>;
-      
-      if (!responseData) {
+    const responses: BatchResponse['responses'] = batch.queries.map(
+      (q, index) => {
+        const key = `q${index}`;
+        const responseData = data[key] as GraphQLResponse<unknown>;
+
+        if (!responseData) {
+          return {
+            name: q.name,
+            data: null,
+            error: { message: `No response for query ${q.name}` },
+          };
+        }
+
         return {
           name: q.name,
-          data: null,
-          error: { message: `No response for query ${q.name}` },
+          data: responseData?.data,
+          error: responseData?.errors?.[0],
         };
       }
-
-      return {
-        name: q.name,
-        data: responseData?.data,
-        error: responseData?.errors?.[0],
-      };
-    });
+    );
 
     return { responses };
   }
@@ -256,6 +336,19 @@ export class GraphQLClient {
   }
 
   /**
+   * Encode form data for POST request
+   */
+  encodeFormData(data: Record<string, string>): string {
+    return Object.entries(data)
+      .map(([key, value]) => {
+        const encodedKey = encodeURIComponent(key);
+        const encodedValue = encodeURIComponent(value);
+        return `${encodedKey}=${encodedValue}`;
+      })
+      .join('&');
+  }
+
+  /**
    * Build base form data
    */
   private buildFormData(): Partial<FacebookFormData> {
@@ -266,19 +359,6 @@ export class GraphQLClient {
       __ccg: 'EXCELLENT',
       __rev: '100',
     };
-  }
-
-  /**
-   * Encode form data for POST request
-   */
-  private encodeFormData(data: Record<string, string>): string {
-    return Object.entries(data)
-      .map(([key, value]) => {
-        const encodedKey = encodeURIComponent(key);
-        const encodedValue = encodeURIComponent(value);
-        return `${encodedKey}=${encodedValue}`;
-      })
-      .join('&');
   }
 
   /**
@@ -296,7 +376,6 @@ export class GraphQLClient {
    * Generate __dyn parameter
    */
   private generateDyn(): string {
-    // This is a simplified version - Facebook's __dyn is complex
     return '7xeUmFoG3Ejy4QjG1mEhy4Q2qewKewSwMxu0SU1szU6U6O12wOx62G1uwJwpUe8hwaQ0z8cE7S0jq0Lk2K0vwbS1Lw9C0le0L83hw6aw8O0jq0wqo4C2m0jq78cE1JwqE2y0gq0N5o4aE3C0Do1swGwQwo8a8462xa';
   }
 
@@ -309,7 +388,11 @@ export class GraphQLClient {
     statusCode: number = 0,
     data?: unknown
   ): Error {
-    const error = new Error(message) as Error & { code: string; statusCode: number; data?: unknown };
+    const error = new Error(message) as Error & {
+      code: string;
+      statusCode: number;
+      data?: unknown;
+    };
     error.code = code;
     error.statusCode = statusCode;
     error.data = data;

@@ -1,8 +1,9 @@
 /**
  * Event Parser for Panindigan
- * Parses MQTT messages into typed events
+ * Parses MQTT messages into typed events — handles both JSON and zlib-compressed binary payloads
  */
 
+import { inflateSync, inflateRawSync } from 'zlib';
 import { logger } from '../utils/Logger.js';
 import type {
   PanindiganEvent,
@@ -21,242 +22,358 @@ import type {
   ThreadAdminEvent,
   ThreadLeaveEvent,
   CallEvent,
+  MessageAttachment,
+  Mention,
+  ThreadColor,
 } from '../types/index.js';
 
 export class EventParser {
   /**
-   * Parse an MQTT message based on topic
+   * Parse an MQTT message based on topic.
+   * Facebook may send JSON directly or zlib-compressed binary payloads — both are handled.
    */
   parse(topic: string, payload: Buffer): PanindiganEvent | null {
-    try {
-      const data = JSON.parse(payload.toString());
+    const data = this.decodePayload(payload);
+    if (data === null) return null;
 
-      switch (topic) {
-        case '/t_ms':
-          return this.parseMessageSync(data);
-        case '/t_rtc':
-          return this.parseRTCEvent(data);
-        case '/t_p':
-          return this.parsePresence(data);
-        case '/t_tn':
-          return this.parseTypingNotification(data);
-        case '/t_graphql':
-          return this.parseGraphQLEvent(data);
-        case '/t_messaging_events':
-          return this.parseMessagingEvent(data);
-        default:
-          // NOTE: MQTTClient subscribes to `mqtt_c2b_${userId}` (no leading slash),
-          // so the check here must match that exact prefix or C2B/personal
-          // message events will always fall through as "unhandled".
-          if (topic.startsWith('mqtt_c2b_')) {
-            return this.parseC2BEvent(data);
-          }
-          logger.debug('Unhandled topic', { topic });
-          return null;
+    switch (topic) {
+      case '/t_ms':
+        return this.parseMessageSync(data);
+      case '/t_rtc':
+        return this.parseRTCEvent(data);
+      case '/t_p':
+        return this.parsePresence(data);
+      case '/t_tn':
+        return this.parseTypingNotification(data);
+      case '/t_graphql':
+        return this.parseGraphQLEvent(data);
+      case '/t_messaging_events':
+        return this.parseMessagingEvent(data);
+      case '/t_notify':
+        return this.parseNotifyEvent(data);
+      default:
+        if (topic.startsWith('mqtt_c2b_')) {
+          return this.parseC2BEvent(data);
+        }
+        logger.debug('Unhandled topic', { topic });
+        return null;
+    }
+  }
+
+  /**
+   * Decode a raw MQTT payload.
+   * Tries JSON first; if that fails, tries zlib inflate (with and without header).
+   */
+  private decodePayload(payload: Buffer): Record<string, unknown> | null {
+    // Try plain JSON first
+    const str = payload.toString('utf8');
+    if (str.trimStart().startsWith('{') || str.trimStart().startsWith('[')) {
+      try {
+        return JSON.parse(str) as Record<string, unknown>;
+      } catch {
+        // fall through to binary decompression
       }
-    } catch (error) {
-      logger.debug('Failed to parse event payload', { topic, error });
+    }
+
+    // Try zlib inflate (deflate with zlib header)
+    try {
+      const inflated = inflateSync(payload);
+      return JSON.parse(inflated.toString('utf8')) as Record<string, unknown>;
+    } catch {
+      // not zlib-wrapped
+    }
+
+    // Try raw deflate (no zlib wrapper — common in FB MQTT streams)
+    try {
+      const inflated = inflateRawSync(payload);
+      return JSON.parse(inflated.toString('utf8')) as Record<string, unknown>;
+    } catch {
+      // not raw deflate
+    }
+
+    // Last attempt: strip possible for(;;); prefix and parse
+    try {
+      const stripped = str.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
+      return JSON.parse(stripped) as Record<string, unknown>;
+    } catch {
+      logger.debug('Could not decode MQTT payload', { length: payload.length });
       return null;
     }
   }
 
   /**
-   * Parse message sync events (handles both 1-1 and group messages)
+   * Parse message sync events from /t_ms.
+   * Facebook pushes all delta types through this topic.
    */
-  private parseMessageSync(data: unknown): PanindiganEvent | null {
-    const msgData = data as Record<string, unknown>;
-
-    // Handle deltas array (Facebook can send multiple events)
-    if (msgData.deltas && Array.isArray(msgData.deltas)) {
-      const deltas = msgData.deltas as unknown[];
-      for (const delta of deltas) {
+  private parseMessageSync(data: Record<string, unknown>): PanindiganEvent | null {
+    // deltas array (Facebook sends batches)
+    if (Array.isArray(data.deltas)) {
+      for (const delta of data.deltas as unknown[]) {
         const parsed = this.parseDelta(delta);
-        if (parsed) {
-          return parsed;
-        }
+        if (parsed) return parsed;
       }
     }
 
-    // Handle single delta
-    if (msgData.delta) {
-      return this.parseDelta(msgData.delta);
+    // single delta wrapper
+    if (data.delta) {
+      return this.parseDelta(data.delta);
     }
 
-    // Handle direct message structure
-    if (msgData.messageMetadata) {
-      return this.parseDirectDelta(msgData);
+    // some payloads carry the delta keys directly
+    if (data.messageMetadata) {
+      return this.parseNewMessage(data);
     }
 
     return null;
   }
 
   /**
-   * Parse a single delta and extract message or event
+   * Dispatch a single delta object to the appropriate parser.
    */
   private parseDelta(delta: unknown): PanindiganEvent | null {
-    const deltaData = delta as Record<string, unknown>;
+    const d = delta as Record<string, unknown>;
+    const cls = (d.class as string | undefined)?.toLowerCase() ?? '';
 
-    // Parse new messages with metadata
-    if (deltaData.messageMetadata) {
-      const metadata = deltaData.messageMetadata as Record<string, unknown>;
-      const threadKey = metadata.threadKey as Record<string, unknown> | undefined;
-
-      // Extract thread ID - works for both 1-1 and group chats
-      const threadId = this.extractThreadId(threadKey);
-      if (!threadId) {
-        logger.debug('Could not extract thread ID from message metadata', { threadKey });
-        return null;
-      }
-
-      // Determine if it's a group chat
-      const isGroup = !!(threadKey as Record<string, string> | undefined)?.threadFbId;
-
-      const event: MessageEvent = {
-        type: 'message',
-        timestamp: Date.now(),
-        message: {
-          messageId: (metadata.messageId as string) || `msg_${Date.now()}`,
-          threadId,
-          senderId: (metadata.actorFbId as string) || '',
-          body: (deltaData.body as string) || '',
-          timestamp: (metadata.timestamp as number) || Date.now(),
-          attachments: this.parseAttachments(deltaData) as unknown as import('../types/index.js').MessageAttachment[],
-          mentions: this.parseMentions(deltaData) as unknown as import('../types/index.js').Mention[],
-          isGroup,
-          reactions: [],
-          isUnread: true,
-        },
-      };
-
-      logger.debug('Parsed message event', {
-        threadId,
-        isGroup,
-        messageId: event.message.messageId,
-        sender: event.message.senderId,
-      });
-
-      return event;
+    // New message
+    if (d.messageMetadata || cls === 'newmessage') {
+      return this.parseNewMessage(d);
     }
 
-    // Parse message reactions
-    if (deltaData.reaction) {
-      const reaction = deltaData.reaction as Record<string, unknown>;
-      const threadKey = deltaData.threadKey as Record<string, unknown> | undefined;
-      const threadId = this.extractThreadId(threadKey);
+    // Reaction add/remove
+    if (cls === 'reactionmessage') {
+      return this.parseReactionDelta(d);
+    }
 
-      if (!threadId) {
-        return null;
-      }
+    // Unsend / delete
+    if (cls === 'unsendmessage') {
+      return this.parseUnsendDelta(d);
+    }
 
-      const event: MessageReactionEvent = {
-        type: 'message_reaction',
-        timestamp: Date.now(),
-        threadId,
-        messageId: (reaction.messageId as string) || '',
-        userId: (deltaData.actorFbId as string) || '',
-        reaction: this.mapReaction((reaction.reaction as string) || ''),
-      };
-      return event;
+    // Read receipt
+    if (cls === 'readreceipt') {
+      return this.parseReadReceiptDelta(d);
+    }
+
+    // Delivery receipt
+    if (cls === 'deliveryreceipt') {
+      return this.parseDeliveryReceiptDelta(d);
+    }
+
+    // Typing (sometimes arrives in /t_ms as well)
+    if (cls === 'typing' || d.type === 'typ') {
+      return this.parseTypingDelta(d);
+    }
+
+    // Thread rename
+    if (cls === 'threadname' || d.deltaThreadName) {
+      return this.parseThreadNameDelta(d);
+    }
+
+    // Admin text / system messages (participant added/removed, etc.)
+    if (cls === 'admintext') {
+      return this.parseAdminTextDelta(d);
+    }
+
+    // Legacy field-based reactions
+    if (d.reaction) {
+      return this.parseReactionDelta(d);
     }
 
     return null;
   }
 
   /**
-   * Parse direct delta structure
+   * Parse a NewMessage delta — the core event for incoming messages.
    */
-  private parseDirectDelta(data: Record<string, unknown>): MessageEvent | null {
-    const metadata = data.messageMetadata as Record<string, unknown> | undefined;
-    if (!metadata) {
-      return null;
-    }
+  private parseNewMessage(d: Record<string, unknown>): MessageEvent | null {
+    const meta = d.messageMetadata as Record<string, unknown> | undefined;
+    if (!meta) return null;
 
-    const threadKey = metadata.threadKey as Record<string, unknown> | undefined;
+    const threadKey = meta.threadKey as Record<string, string> | undefined;
     const threadId = this.extractThreadId(threadKey);
     if (!threadId) {
+      logger.debug('NewMessage: no thread ID', { threadKey });
       return null;
     }
 
-    const isGroup = !!(threadKey as Record<string, string> | undefined)?.threadFbId;
+    const isGroup = !!(threadKey?.threadFbId);
+    const messageId = (meta.messageId as string) || `msg_${Date.now()}`;
+    const senderId = (meta.actorFbId as string) || '';
+    const timestamp = Number(meta.timestamp) || Date.now();
 
-    return {
+    const attachments = this.parseAttachments(d);
+    const mentions = this.parseMentions(d);
+    const stickerId = (d.stickerId as string) || undefined;
+    const replyTo = (d.repliedToMessageId as string) || undefined;
+
+    const event: MessageEvent = {
       type: 'message',
-      timestamp: Date.now(),
+      timestamp,
       message: {
-        messageId: (metadata.messageId as string) || `msg_${Date.now()}`,
+        messageId,
         threadId,
-        senderId: (metadata.actorFbId as string) || '',
-        body: (data.body as string) || '',
-        timestamp: (metadata.timestamp as number) || Date.now(),
-        attachments: this.parseAttachments(data) as unknown as import('../types/index.js').MessageAttachment[],
-        mentions: this.parseMentions(data) as unknown as import('../types/index.js').Mention[],
+        senderId,
+        body: (d.body as string) || '',
+        timestamp,
+        attachments,
+        mentions,
         isGroup,
         reactions: [],
         isUnread: true,
+        ...(stickerId && { sticker: stickerId }),
+        ...(replyTo && { replyToMessage: replyTo }),
       },
+    };
+
+    logger.debug('Parsed message event', { threadId, isGroup, messageId, senderId });
+    return event;
+  }
+
+  /**
+   * Parse a ReactionMessage delta.
+   */
+  private parseReactionDelta(d: Record<string, unknown>): MessageReactionEvent | null {
+    const threadKey =
+      (d.threadKey as Record<string, string> | undefined) ||
+      (d.messageKey as Record<string, Record<string, string>>)?.threadKey;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
+
+    const reactionRaw =
+      (d.reaction as string) ||
+      ((d.reaction as Record<string, string> | undefined)?.reaction ?? '');
+
+    const event: MessageReactionEvent = {
+      type: 'message_reaction',
+      timestamp: Date.now(),
+      threadId,
+      messageId: (d.messageId as string) || '',
+      userId: (d.userFbId as string) || (d.actorFbId as string) || '',
+      reaction: this.mapReaction(reactionRaw),
+    };
+    return event;
+  }
+
+  /**
+   * Parse an UnsendMessage delta.
+   */
+  private parseUnsendDelta(d: Record<string, unknown>): PanindiganEvent | null {
+    const threadKey = d.threadKey as Record<string, string> | undefined;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
+
+    return {
+      type: 'message_unsend',
+      timestamp: Date.now(),
+      threadId,
+      messageId: (d.messageId as string) || '',
+      userId: (d.actorFbId as string) || '',
+    } as unknown as PanindiganEvent;
+  }
+
+  /**
+   * Parse a ReadReceipt delta.
+   */
+  private parseReadReceiptDelta(d: Record<string, unknown>): ReadReceiptEvent | null {
+    const threadKey = d.threadKey as Record<string, string> | undefined;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
+
+    return {
+      type: 'read_receipt',
+      timestamp: Date.now(),
+      threadId,
+      userId: (d.actorFbId as string) || '',
+      watermarkTimestamp: Number(d.actionTimestampMs) || Date.now(),
     };
   }
 
   /**
-   * Extract thread ID from threadKey (handles both group and 1-1)
+   * Parse a DeliveryReceipt delta.
    */
-  private extractThreadId(threadKey: Record<string, unknown> | undefined): string | null {
-    if (!threadKey) {
-      return null;
-    }
+  private parseDeliveryReceiptDelta(d: Record<string, unknown>): DeliveryReceiptEvent | null {
+    const threadKey = d.threadKey as Record<string, string> | undefined;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
 
-    // For group chats, use threadFbId
-    if (threadKey.threadFbId) {
-      return threadKey.threadFbId as string;
-    }
-
-    // For 1-1 chats, use otherUserFbId
-    if (threadKey.otherUserFbId) {
-      return threadKey.otherUserFbId as string;
-    }
-
-    return null;
+    return {
+      type: 'delivery_receipt',
+      timestamp: Date.now(),
+      threadId,
+      userId: (d.actorFbId as string) || '',
+      deliveredTimestamp: Number(d.deliveredWatermarkTimestampMs) || Date.now(),
+    };
   }
 
   /**
-   * Parse attachments from delta
+   * Parse a typing delta arriving inside /t_ms.
    */
-  private parseAttachments(delta: Record<string, unknown>): unknown[] {
-    const attachments = delta.attachments;
-    if (!attachments || !Array.isArray(attachments)) {
-      return [];
-    }
-    return attachments;
+  private parseTypingDelta(d: Record<string, unknown>): TypingEvent | null {
+    const threadKey =
+      (d.threadKey as Record<string, string> | undefined) ||
+      (d.thread_key as Record<string, string> | undefined);
+
+    // Try threadKey first, then flat fields
+    const threadId =
+      this.extractThreadId(threadKey) ||
+      (d.thread_fbid as string) ||
+      (d.other_user_fbid as string) ||
+      (d.threadId as string);
+
+    if (!threadId) return null;
+
+    return {
+      type: 'typ',
+      timestamp: Date.now(),
+      threadId,
+      userId: (d.sender_fbid as string) || (d.actorFbId as string) || '',
+      isTyping: Number(d.state) === 1 || Number(d.typingStatus) === 1,
+    };
   }
 
   /**
-   * Parse mentions from delta
+   * Parse an AdminText delta (thread renames, participant changes, etc.).
    */
-  private parseMentions(delta: Record<string, unknown>): unknown[] {
-    const mentions = delta.mentions;
-    if (!mentions || !Array.isArray(mentions)) {
-      return [];
-    }
-    return mentions;
-  }
+  private parseAdminTextDelta(d: Record<string, unknown>): PanindiganEvent | null {
+    const threadKey = d.threadKey as Record<string, string> | undefined;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
 
-  /**
-   * Parse RTC (Real-Time Call) events
-   */
-  private parseRTCEvent(data: unknown): PanindiganEvent | null {
-    const rtcData = data as Record<string, unknown>;
+    const body = (d.body as string) || '';
+    const actorFbId = (d.actorFbId as string) || '';
 
-    if (rtcData.callState) {
-      const event: CallEvent = {
-        type: 'call',
+    // Thread rename
+    if (body.includes('named the group') || d.adminText === 'group_name_change') {
+      const event: ThreadRenameEvent = {
+        type: 'thread_rename',
         timestamp: Date.now(),
-        callId: rtcData.callId as string,
-        threadId: rtcData.threadId as string,
-        callerId: rtcData.callerId as string,
-        isVideo: rtcData.isVideoCall as boolean || false,
-        isGroupCall: rtcData.isGroupCall as boolean || false,
-        status: this.mapCallState(rtcData.callState as string),
-        duration: rtcData.duration as number,
+        threadId,
+        author: actorFbId,
+        name: (d.name as string) || '',
+      };
+      return event;
+    }
+
+    // Participants added
+    if (body.includes('added') || d.adminText === 'group_add') {
+      const event: ThreadParticipantsEvent = {
+        type: 'thread_add_participants',
+        timestamp: Date.now(),
+        threadId,
+        author: actorFbId,
+        participantIds: (d.addedParticipants as string[]) || [],
+      };
+      return event;
+    }
+
+    // Participants removed
+    if (body.includes('removed') || d.adminText === 'group_remove') {
+      const event: ThreadParticipantsEvent = {
+        type: 'thread_remove_participants',
+        timestamp: Date.now(),
+        threadId,
+        author: actorFbId,
+        participantIds: (d.removedParticipants as string[]) || [],
       };
       return event;
     }
@@ -265,74 +382,139 @@ export class EventParser {
   }
 
   /**
-   * Parse presence updates
+   * Parse a thread-name delta (from /t_ms or /t_graphql).
    */
-  private parsePresence(data: unknown): PresenceEvent | null {
-    const presenceData = data as Record<string, unknown>;
+  private parseThreadNameDelta(d: Record<string, unknown>): ThreadRenameEvent | null {
+    const inner = (d.deltaThreadName as Record<string, unknown>) || d;
+    const threadKey = inner.threadKey as Record<string, string> | undefined;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
 
-    const event: PresenceEvent = {
-      type: 'presence',
+    return {
+      type: 'thread_rename',
       timestamp: Date.now(),
-      userId: presenceData.userId as string,
-      status: this.mapPresenceStatus(presenceData.status as string),
-      lastActive: presenceData.lastActive as number,
+      threadId,
+      author: (inner.actorFbId as string) || '',
+      name: (inner.name as string) || '',
     };
-
-    return event;
   }
 
   /**
-   * Parse typing notifications
+   * Parse RTC (Real-Time Call) events from /t_rtc.
    */
-  private parseTypingNotification(data: unknown): TypingEvent | null {
-    const typingData = data as Record<string, unknown>;
+  private parseRTCEvent(data: Record<string, unknown>): CallEvent | null {
+    if (!data.callState) return null;
 
-    const event: TypingEvent = {
+    return {
+      type: 'call',
+      timestamp: Date.now(),
+      callId: (data.callId as string) || '',
+      threadId: (data.threadId as string) || '',
+      callerId: (data.callerId as string) || '',
+      isVideo: !!(data.isVideoCall),
+      isGroupCall: !!(data.isGroupCall),
+      status: this.mapCallState(data.callState as string),
+      duration: data.duration as number,
+    };
+  }
+
+  /**
+   * Parse presence updates from /t_p.
+   * FB sends presence as either a plain object or a list.
+   */
+  private parsePresence(data: Record<string, unknown>): PresenceEvent | null {
+    // Single presence update
+    if (data.userId || data.uid) {
+      return {
+        type: 'presence',
+        timestamp: Date.now(),
+        userId: (data.userId as string) || (data.uid as string),
+        status: this.mapPresenceStatus(data.status as string),
+        lastActive: data.lastActive as number,
+      };
+    }
+
+    // Bulk presence map  { "<uid>": { "p": 2, "lat": 1234567890 }, ... }
+    const keys = Object.keys(data).filter((k) => /^\d+$/.test(k));
+    if (keys.length > 0) {
+      const uid = keys[0];
+      const entry = data[uid] as Record<string, unknown>;
+      const p = Number(entry.p);
+      let status: 'active' | 'idle' | 'offline' = 'offline';
+      if (p === 2) status = 'active';
+      else if (p === 0) status = 'idle';
+
+      return {
+        type: 'presence',
+        timestamp: Date.now(),
+        userId: uid,
+        status,
+        lastActive: entry.lat as number,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Parse typing notifications from /t_tn.
+   */
+  private parseTypingNotification(data: Record<string, unknown>): TypingEvent | null {
+    // Extract thread ID from thread_key or direct fields
+    const threadKey =
+      (data.thread_key as Record<string, string> | undefined) ||
+      (data.threadKey as Record<string, string> | undefined);
+
+    const threadId =
+      this.extractThreadId(threadKey) ||
+      (threadKey?.thread_fbid as string) ||
+      (data.to as string) ||
+      (data.threadId as string);
+
+    if (!threadId) return null;
+
+    return {
       type: 'typ',
       timestamp: Date.now(),
-      threadId: typingData.threadId as string,
-      userId: typingData.senderId as string,
-      isTyping: typingData.typingStatus === 1,
+      threadId,
+      userId: (data.sender_fbid as string) || (data.from as string) || '',
+      isTyping: Number(data.state) === 1 || Number(data.typ) === 1,
     };
-
-    return event;
   }
 
   /**
-   * Parse GraphQL events
+   * Parse GraphQL events from /t_graphql.
+   * Facebook sends structured thread-level mutations through this topic.
    */
-  private parseGraphQLEvent(data: unknown): PanindiganEvent | null {
-    const gqlData = data as Record<string, unknown>;
-
-    // Parse thread updates
-    if (gqlData.deltaThreadName) {
-      const delta = gqlData.deltaThreadName as Record<string, unknown>;
+  private parseGraphQLEvent(data: Record<string, unknown>): PanindiganEvent | null {
+    if (data.deltaThreadName) {
+      const delta = data.deltaThreadName as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadRenameEvent = {
         type: 'thread_rename',
         timestamp: Date.now(),
-        threadId: threadKey?.threadFbId || '',
+        threadId: threadKey?.threadFbId || threadKey?.otherUserFbId || '',
         author: delta.actorFbId as string,
         name: delta.name as string,
       };
       return event;
     }
 
-    if (gqlData.deltaThreadColor) {
-      const delta = gqlData.deltaThreadColor as Record<string, unknown>;
+    if (data.deltaThreadColor) {
+      const delta = data.deltaThreadColor as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadColorEvent = {
         type: 'thread_color',
         timestamp: Date.now(),
         threadId: threadKey?.threadFbId || '',
         author: delta.actorFbId as string,
-        color: delta.color as import('../types/index.js').ThreadColor,
+        color: (delta.color as ThreadColor),
       };
       return event;
     }
 
-    if (gqlData.deltaThreadIcon) {
-      const delta = gqlData.deltaThreadIcon as Record<string, unknown>;
+    if (data.deltaThreadIcon) {
+      const delta = data.deltaThreadIcon as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadEmojiEvent = {
         type: 'thread_emoji',
@@ -344,8 +526,8 @@ export class EventParser {
       return event;
     }
 
-    if (gqlData.deltaThreadImage) {
-      const delta = gqlData.deltaThreadImage as Record<string, unknown>;
+    if (data.deltaThreadImage) {
+      const delta = data.deltaThreadImage as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadImageEvent = {
         type: 'thread_image',
@@ -357,8 +539,8 @@ export class EventParser {
       return event;
     }
 
-    if (gqlData.deltaNickname) {
-      const delta = gqlData.deltaNickname as Record<string, unknown>;
+    if (data.deltaNickname) {
+      const delta = data.deltaNickname as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadNicknameEvent = {
         type: 'thread_nickname',
@@ -371,60 +553,60 @@ export class EventParser {
       return event;
     }
 
-    if (gqlData.deltaParticipantsAdded) {
-      const delta = gqlData.deltaParticipantsAdded as Record<string, unknown>;
+    if (data.deltaParticipantsAdded) {
+      const delta = data.deltaParticipantsAdded as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadParticipantsEvent = {
         type: 'thread_add_participants',
         timestamp: Date.now(),
         threadId: threadKey?.threadFbId || '',
         author: delta.actorFbId as string,
-        participantIds: delta.participantIds as string[],
+        participantIds: (delta.participantIds as string[]) || [],
       };
       return event;
     }
 
-    if (gqlData.deltaParticipantsRemoved) {
-      const delta = gqlData.deltaParticipantsRemoved as Record<string, unknown>;
+    if (data.deltaParticipantsRemoved) {
+      const delta = data.deltaParticipantsRemoved as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadParticipantsEvent = {
         type: 'thread_remove_participants',
         timestamp: Date.now(),
         threadId: threadKey?.threadFbId || '',
         author: delta.actorFbId as string,
-        participantIds: delta.participantIds as string[],
+        participantIds: (delta.participantIds as string[]) || [],
       };
       return event;
     }
 
-    if (gqlData.deltaAdminAdded) {
-      const delta = gqlData.deltaAdminAdded as Record<string, unknown>;
+    if (data.deltaAdminAdded) {
+      const delta = data.deltaAdminAdded as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadAdminEvent = {
         type: 'thread_promote',
         timestamp: Date.now(),
         threadId: threadKey?.threadFbId || '',
         author: delta.actorFbId as string,
-        participantIds: delta.participantIds as string[],
+        participantIds: (delta.participantIds as string[]) || [],
       };
       return event;
     }
 
-    if (gqlData.deltaAdminRemoved) {
-      const delta = gqlData.deltaAdminRemoved as Record<string, unknown>;
+    if (data.deltaAdminRemoved) {
+      const delta = data.deltaAdminRemoved as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadAdminEvent = {
         type: 'thread_demote',
         timestamp: Date.now(),
         threadId: threadKey?.threadFbId || '',
         author: delta.actorFbId as string,
-        participantIds: delta.participantIds as string[],
+        participantIds: (delta.participantIds as string[]) || [],
       };
       return event;
     }
 
-    if (gqlData.deltaLeftThread) {
-      const delta = gqlData.deltaLeftThread as Record<string, unknown>;
+    if (data.deltaLeftThread) {
+      const delta = data.deltaLeftThread as Record<string, unknown>;
       const threadKey = delta.threadKey as Record<string, string> | undefined;
       const event: ThreadLeaveEvent = {
         type: 'thread_leave',
@@ -435,57 +617,132 @@ export class EventParser {
       return event;
     }
 
-    return null;
-  }
-
-  /**
-   * Parse messaging events
-   */
-  private parseMessagingEvent(data: unknown): PanindiganEvent | null {
-    const msgData = data as Record<string, unknown>;
-
-    // Parse read receipts
-    if (msgData.readReceipt) {
-      const receipt = msgData.readReceipt as Record<string, unknown>;
-      const event: ReadReceiptEvent = {
-        type: 'read_receipt',
-        timestamp: Date.now(),
-        threadId: receipt.threadId as string,
-        userId: receipt.actorFbId as string,
-        watermarkTimestamp: receipt.watermarkTimestamp as number,
-      };
-      return event;
-    }
-
-    // Parse delivery receipts
-    if (msgData.deliveryReceipt) {
-      const receipt = msgData.deliveryReceipt as Record<string, unknown>;
-      const event: DeliveryReceiptEvent = {
-        type: 'delivery_receipt',
-        timestamp: Date.now(),
-        threadId: receipt.threadId as string,
-        userId: receipt.actorFbId as string,
-        deliveredTimestamp: receipt.deliveredTimestamp as number,
-      };
-      return event;
-    }
-
-    return null;
-  }
-
-  /**
-   * Parse C2B (Client to Business) events
-   */
-  private parseC2BEvent(data: unknown): PanindiganEvent | null {
-    // Handle personal message events
+    // Forward generic message sync deltas
     return this.parseMessageSync(data);
   }
 
   /**
-   * Map reaction string to ReactionType
+   * Parse messaging events from /t_messaging_events.
    */
-  private mapReaction(reaction: string): 'like' | 'love' | 'haha' | 'wow' | 'sad' | 'angry' | 'care' | null {
-    const reactionMap: Record<string, 'like' | 'love' | 'haha' | 'wow' | 'sad' | 'angry' | 'care'> = {
+  private parseMessagingEvent(data: Record<string, unknown>): PanindiganEvent | null {
+    if (data.readReceipt) {
+      const receipt = data.readReceipt as Record<string, unknown>;
+      const threadKey = receipt.threadKey as Record<string, string> | undefined;
+      const threadId = this.extractThreadId(threadKey) || (receipt.threadId as string);
+      return {
+        type: 'read_receipt',
+        timestamp: Date.now(),
+        threadId: threadId || '',
+        userId: (receipt.actorFbId as string) || '',
+        watermarkTimestamp: Number(receipt.watermarkTimestamp) || Date.now(),
+      } as ReadReceiptEvent;
+    }
+
+    if (data.deliveryReceipt) {
+      const receipt = data.deliveryReceipt as Record<string, unknown>;
+      const threadKey = receipt.threadKey as Record<string, string> | undefined;
+      const threadId = this.extractThreadId(threadKey) || (receipt.threadId as string);
+      return {
+        type: 'delivery_receipt',
+        timestamp: Date.now(),
+        threadId: threadId || '',
+        userId: (receipt.actorFbId as string) || '',
+        deliveredTimestamp: Number(receipt.deliveredTimestamp) || Date.now(),
+      } as DeliveryReceiptEvent;
+    }
+
+    // Some platforms also route new messages here
+    return this.parseMessageSync(data);
+  }
+
+  /**
+   * Parse /t_notify events (push notifications, generic alerts).
+   */
+  private parseNotifyEvent(data: Record<string, unknown>): PanindiganEvent | null {
+    // Notifications that carry a delta array inside
+    if (Array.isArray(data.deltas)) {
+      for (const delta of data.deltas as unknown[]) {
+        const parsed = this.parseDelta(delta);
+        if (parsed) return parsed;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Parse C2B (personal/C2B MQTT topic) events.
+   */
+  private parseC2BEvent(data: Record<string, unknown>): PanindiganEvent | null {
+    return this.parseMessageSync(data);
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  /**
+   * Extract thread ID from a threadKey object.
+   * Group chats expose threadFbId; 1-1 chats expose otherUserFbId.
+   */
+  private extractThreadId(
+    threadKey: Record<string, string> | undefined
+  ): string | null {
+    if (!threadKey) return null;
+    return (
+      threadKey.threadFbId ||
+      threadKey.thread_fbid ||
+      threadKey.otherUserFbId ||
+      threadKey.other_user_fbid ||
+      null
+    );
+  }
+
+  /**
+   * Parse the attachments array from a delta, normalising each entry.
+   */
+  private parseAttachments(delta: Record<string, unknown>): MessageAttachment[] {
+    if (!Array.isArray(delta.attachments)) return [];
+    return (delta.attachments as Record<string, unknown>[]).map((a) => {
+      const type =
+        (a.attach_type as string) ||
+        (a.type as string) ||
+        'file';
+
+      return {
+        id: (a.id as string) || (a.fbid as string) || '',
+        type,
+        name: (a.name as string) || '',
+        url:
+          (a.url as string) ||
+          (a.preview_url as string) ||
+          (a.large_preview_url as string) ||
+          '',
+        mimeType: (a.mime_type as string) || '',
+        fileSize: Number(a.file_size) || undefined,
+        width: Number(a.original_dimensions_width) || undefined,
+        height: Number(a.original_dimensions_height) || undefined,
+      } as MessageAttachment;
+    });
+  }
+
+  /**
+   * Parse @-mentions from a delta.
+   */
+  private parseMentions(delta: Record<string, unknown>): Mention[] {
+    if (!Array.isArray(delta.mentions)) return [];
+    return (delta.mentions as Record<string, unknown>[]).map((m) => ({
+      id: (m.id as string) || (m.user_id as string) || '',
+      tag: (m.tag as string) || (m.name as string) || '',
+      offset: Number(m.offset) || 0,
+      length: Number(m.length) || 0,
+    }));
+  }
+
+  /**
+   * Map a raw reaction emoji or string to a canonical reaction type.
+   */
+  private mapReaction(
+    reaction: string
+  ): 'like' | 'love' | 'haha' | 'wow' | 'sad' | 'angry' | 'care' | null {
+    const map: Record<string, 'like' | 'love' | 'haha' | 'wow' | 'sad' | 'angry' | 'care'> = {
       '👍': 'like',
       '❤️': 'love',
       '😆': 'haha',
@@ -493,39 +750,36 @@ export class EventParser {
       '😢': 'sad',
       '😠': 'angry',
       '🥰': 'care',
+      like: 'like',
+      love: 'love',
+      haha: 'haha',
+      wow: 'wow',
+      sad: 'sad',
+      angry: 'angry',
+      care: 'care',
     };
-    return reactionMap[reaction] || null;
+    return map[reaction] ?? null;
   }
 
   /**
-   * Map presence status string
+   * Map a presence status string to a typed value.
    */
   private mapPresenceStatus(status: string): 'active' | 'idle' | 'offline' {
-    switch (status) {
-      case 'ACTIVE':
-      case 'active':
-        return 'active';
-      case 'IDLE':
-      case 'idle':
-        return 'idle';
-      default:
-        return 'offline';
+    switch (status?.toUpperCase()) {
+      case 'ACTIVE': return 'active';
+      case 'IDLE': return 'idle';
+      default: return 'offline';
     }
   }
 
   /**
-   * Map call state string
+   * Map a call state string to a typed value.
    */
   private mapCallState(state: string): 'started' | 'ended' | 'missed' {
-    switch (state) {
-      case 'STARTED':
-      case 'started':
-        return 'started';
-      case 'ENDED':
-      case 'ended':
-        return 'ended';
-      default:
-        return 'missed';
+    switch (state?.toUpperCase()) {
+      case 'STARTED': return 'started';
+      case 'ENDED': return 'ended';
+      default: return 'missed';
     }
   }
 }

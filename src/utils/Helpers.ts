@@ -1,16 +1,18 @@
 /**
  * Helper Utilities for Panindigan
  */
- 
+
 import { randomBytes } from 'crypto';
- 
+
+let _clientMutationId = 0;
+
 /**
  * Generate a random string of specified length
  */
 export function generateRandomString(length: number = 16): string {
   return randomBytes(length).toString('hex').substring(0, length);
 }
- 
+
 /**
  * Generate a UUID v4
  */
@@ -21,21 +23,21 @@ export function generateUUID(): string {
     return v.toString(16);
   });
 }
- 
+
 /**
  * Generate a client ID for MQTT
  */
 export function generateClientId(): string {
   return `mqtt-${generateRandomString(8)}`;
 }
- 
+
 /**
  * Generate device ID
  */
 export function generateDeviceId(): string {
   return `device-${generateRandomString(16)}`;
 }
- 
+
 /**
  * Generate jazoest value from fb_dtsg
  */
@@ -46,7 +48,25 @@ export function generateJazoest(fbDtsg: string): string {
   }
   return `2${sum}`;
 }
- 
+
+/**
+ * Generate a real Messenger offline threading ID.
+ * Upper 42 bits = current time in ms, lower 22 bits = random.
+ * This matches the format Facebook's own clients generate.
+ */
+export function generateOfflineThreadingId(): string {
+  const now = BigInt(Date.now());
+  const random = BigInt(Math.floor(Math.random() * 0x3FFFFF));
+  return ((now << 22n) | random).toString();
+}
+
+/**
+ * Generate an incrementing client mutation ID
+ */
+export function generateClientMutationId(): number {
+  return ++_clientMutationId;
+}
+
 /**
  * Parse cookie string to object
  */
@@ -60,7 +80,7 @@ export function parseCookieString(cookieStr: string): Record<string, string> {
   });
   return cookies;
 }
- 
+
 /**
  * Convert cookies object to string
  */
@@ -69,20 +89,21 @@ export function cookiesToString(cookies: Record<string, string>): string {
     .map(([name, value]) => `${name}=${value}`)
     .join('; ');
 }
- 
+
 /**
  * Extract fb_dtsg from HTML
  */
 export function extractFbDtsg(html: string): string | null {
-  // Try multiple patterns for fb_dtsg
   const patterns = [
     /"DTSGInitialData",\[],{"token":"([^"]+)"/,
     /"dtsg":{"token":"([^"]+)"/,
     /name="fb_dtsg" value="([^"]+)"/,
     /"fb_dtsg":"([^"]+)"/,
     /DTSGInitData.*token":"([^"]+)"/,
+    /"DTSGInitData",\[\],\{"token":"([^"]+)"/,
+    /"token":"([^"]+)","expires_at"/,
   ];
- 
+
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
@@ -91,7 +112,7 @@ export function extractFbDtsg(html: string): string | null {
   }
   return null;
 }
- 
+
 /**
  * Extract user ID from HTML or cookies
  */
@@ -102,7 +123,7 @@ export function extractUserId(html: string): string | null {
     /"current_user_id":"(\d+)"/,
     /"userID":"(\d+)"/,
   ];
- 
+
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
@@ -111,7 +132,7 @@ export function extractUserId(html: string): string | null {
   }
   return null;
 }
- 
+
 /**
  * Extract iris sequence ID from HTML
  */
@@ -130,7 +151,7 @@ export function extractIrisSeqId(html: string): string | null {
     /irisSeqId=(\d+)/,
     /seqId=(\d+)/,
   ];
- 
+
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match && match[1]) {
@@ -139,42 +160,38 @@ export function extractIrisSeqId(html: string): string | null {
   }
   return null;
 }
- 
+
 /**
  * Format thread ID (handle both user and group IDs)
  */
 export function formatThreadId(id: string): string {
-  // If it's already in the correct format, return as-is
   if (id.startsWith('t_') || id.includes('.com/')) {
     return id;
   }
-  // Otherwise, assume it's a valid thread ID
   return id;
 }
- 
+
 /**
  * Check if ID is a group/thread ID
  */
 export function isGroupId(id: string): boolean {
-  // Group IDs typically start with a number and have specific patterns
   return /^\d{15,16}$/.test(id);
 }
- 
+
 /**
  * Check if ID is a user ID
  */
 export function isUserId(id: string): boolean {
-  // User IDs are typically 15 digits
   return /^\d{15}$/.test(id);
 }
- 
+
 /**
  * Generate a request ID
  */
 export function generateRequestId(): string {
   return generateRandomString(8);
 }
- 
+
 /**
  * Generate __req parameter
  */
@@ -188,14 +205,14 @@ export function generateReqParam(): string {
   }
   return result;
 }
- 
+
 /**
  * Sleep/delay utility
  */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
- 
+
 /**
  * Retry a function with exponential backoff
  */
@@ -207,25 +224,24 @@ export async function retryWithBackoff<T>(
 ): Promise<T> {
   let lastError: Error | undefined;
   let delay = initialDelay;
- 
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      
+
       if (attempt < maxRetries - 1) {
-        // Add jitter to prevent thundering herd
         const jitter = Math.random() * 0.3 * delay;
         await sleep(delay + jitter);
         delay = Math.min(delay * 2, maxDelay);
       }
     }
   }
- 
+
   throw lastError;
 }
- 
+
 /**
  * Validate email format
  */
@@ -233,7 +249,7 @@ export function isValidEmail(email: string): boolean {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
 }
- 
+
 /**
  * Truncate string with ellipsis
  */
@@ -241,7 +257,7 @@ export function truncate(str: string, maxLength: number): string {
   if (str.length <= maxLength) return str;
   return str.substring(0, maxLength - 3) + '...';
 }
- 
+
 /**
  * Deep merge objects
  */
@@ -250,7 +266,7 @@ export function deepMerge<T extends Record<string, unknown>>(
   source: Partial<T>
 ): T {
   const result = { ...target };
-  
+
   for (const key in source) {
     if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
       result[key] = deepMerge(
@@ -261,10 +277,10 @@ export function deepMerge<T extends Record<string, unknown>>(
       result[key] = source[key] as T[Extract<keyof T, string>];
     }
   }
-  
+
   return result;
 }
- 
+
 /**
  * Get MIME type from file extension
  */
@@ -288,7 +304,7 @@ export function getMimeTypeFromExtension(filename: string): string {
   };
   return mimeTypes[ext || ''] || 'application/octet-stream';
 }
- 
+
 /**
  * Format bytes to human readable
  */
@@ -299,7 +315,7 @@ export function formatBytes(bytes: number, decimals: number = 2): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(decimals)) + ' ' + sizes[i];
 }
- 
+
 /**
  * Parse URL parameters
  */
@@ -311,7 +327,7 @@ export function parseUrlParams(url: string): Record<string, string> {
   });
   return params;
 }
- 
+
 /**
  * Build URL with query parameters
  */
@@ -323,4 +339,12 @@ export function buildUrl(baseUrl: string, params: Record<string, string>): strin
     }
   });
   return url.toString();
+}
+
+/**
+ * Strip Facebook's for(;;); JSON prefix and parse
+ */
+export function parseFacebookResponse<T>(text: string): T {
+  const jsonStr = text.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
+  return JSON.parse(jsonStr) as T;
 }
