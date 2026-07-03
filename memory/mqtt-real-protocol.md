@@ -1,0 +1,10 @@
+---
+name: Facebook MQTT real protocol (not 3.1.1)
+description: Facebook's chat broker requires MQTT 3.1 with a JSON username payload and the "mqtt" WS subprotocol — a bare 3.1.1 CONNECT gets silently dropped.
+---
+
+Facebook's Messenger broker (`edge-chat.facebook.com`/`edge-chat.messenger.com`) does **not** speak standard MQTT 3.1.1. Sending a vanilla 3.1.1 CONNECT (protocol name "MQTT", level 4, no username) causes the broker to close the raw WebSocket before ever sending a CONNACK — surfaces as an opaque connection timeout with `wsState: CLOSED`, no MQTT-level error at all.
+
+**Why:** confirmed against known-good open-source reverse-engineered implementations (fca-unofficial/ws3-fca) — Facebook uses MQTT 3.1 (protocol name `"MQIsdp"`, level `3`) and repurposes the CONNECT `username` field to carry a JSON auth/device blob: `{ u: userId, s: mqttSessionId, cp: 3, ecp: 10, chat_on: true, fg: false, d: deviceId, ct: "websocket", aid: 219994525426954, mqtt_sid: mqttSessionId, st: [], pm: [], dc: "", no_auto_fg: true, gas: null, pack: [] }`. The WebSocket upgrade must also negotiate the `"mqtt"` subprotocol (`Sec-WebSocket-Protocol`).
+
+**How to apply:** When touching `buildConnectPacket()`/WebSocket setup in `src/mqtt/MQTTClient.ts` or `FastMQTT.ts`: keep protocol name `MQIsdp`/level 3, keep the username-present connect flag with the JSON payload above, keep `new WebSocket(url, 'mqtt', {...})`. The broker URL only needs `sid` (a random per-connection int from `generateMqttSessionId()`, NOT the Iris `irisSeqId`), `cid`, and `region`. Message backlog resumption is a separate post-CONNACK PUBLISH to `/messenger_sync_create_queue` (fresh) or `/messenger_sync_get_diffs` (with a real `irisSeqId` as `last_seq_id`) — never put `irisSeqId` in the CONNECT/URL.

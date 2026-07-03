@@ -3,5 +3,6 @@
 - [Circuit breaker typed error](circuit-breaker-error.md) — CircuitBreaker.execute() throws plain Error when OPEN; catch and re-throw as NetworkError in RequestHandler
 - [Offline threading ID](offline-threading-id.md) — 64-bit BigInt: (Date.now() << 22n) | random22bits; must stay BigInt to avoid JS precision loss
 - [Error subclass readonly fields](error-subclass-readonly.md) — PanindiganError marks `code` readonly; subclasses must pass code via super(), not reassign after
-- [MQTTClient topic sync](mqtt-topics.md) — subscribeToTopics() and buildBrokerUrl() must stay in sync; both need the full MQTT_TOPICS list including orca_*/webrtc topics
+- [MQTTClient topic sync](mqtt-topics.md) — subscribeToTopics() needs the full MQTT_TOPICS list; broker URL no longer carries topics (see mqtt-real-protocol.md)
 - [Logger logMessage directions](logger-directions.md) — logMessage() only accepts 'sent' | 'received'; use 'sent' for location/contact/forward sends
+- [Facebook MQTT real protocol](mqtt-real-protocol.md) — broker needs MQTT 3.1 ("MQIsdp") + JSON username payload + "mqtt" WS subprotocol, not bare 3.1.1

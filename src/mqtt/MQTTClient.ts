@@ -6,8 +6,8 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/Logger.js';
-import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS, MQTT_TOPICS } from '../utils/Constants.js';
-import { generateClientId } from '../utils/Helpers.js';
+import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS, MQTT_TOPICS, MQTT_WEB_APP_ID } from '../utils/Constants.js';
+import { generateClientId, generateMqttSessionId } from '../utils/Helpers.js';
 import { EventParser } from '../events/EventParser.js';
 import type { Session, PanindiganEvent } from '../types/index.js';
  
@@ -35,11 +35,15 @@ export class MQTTClient extends EventEmitter {
   // Use 180s timeout for MQTT connection (Facebook can be slow with groups)
   private connectionTimeout: number = 180000;
   private eventParser: EventParser;
+  // Random per-connection MQTT session id (the "s"/"mqtt_sid" fields and the
+  // broker URL's "sid" param). This is NOT the Iris sync sequence id.
+  private mqttSessionId: number;
  
   constructor(session: Session) {
     super();
     this.session = session;
     this.clientId = generateClientId();
+    this.mqttSessionId = generateMqttSessionId();
     this.eventParser = new EventParser();
     // Increase max listeners to prevent memory leak warnings
     this.setMaxListeners(50);
@@ -71,8 +75,13 @@ export class MQTTClient extends EventEmitter {
         hasXS: this.session.cookies.some(c => c.key === 'xs'),
       });
       
-      // Create WebSocket connection
-      this.ws = new WebSocket(brokerUrl, {
+      // Create WebSocket connection.
+      // IMPORTANT: Facebook's chat broker requires the "mqtt" WebSocket
+      // subprotocol to be negotiated via Sec-WebSocket-Protocol. Without it
+      // the broker accepts the WS upgrade but then closes the raw socket
+      // before ever reading the MQTT CONNECT packet — which is exactly the
+      // "wsState: CLOSED" / connection-timeout symptom with no CONNACK.
+      this.ws = new WebSocket(brokerUrl, 'mqtt', {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Origin': 'https://www.facebook.com',
@@ -81,11 +90,8 @@ export class MQTTClient extends EventEmitter {
           'Cache-Control': 'no-cache',
           'Pragma': 'no-cache',
           'Referer': 'https://www.facebook.com/',
-          'Connection': 'upgrade',
-          'Upgrade': 'websocket',
-          'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits',
-          'Sec-WebSocket-Version': '13',
         },
+        perMessageDeflate: false,
         timeout: this.connectionTimeout,
         handshakeTimeout: this.connectionTimeout,
       });
@@ -317,6 +323,9 @@ export class MQTTClient extends EventEmitter {
       
       // Subscribe to required topics
       this.subscribeToTopics();
+
+      // Resume/create the Iris sync queue so message backlog starts flowing
+      this.sendSyncQueue();
       
       // Process queued messages
       this.processMessageQueue();
@@ -346,6 +355,39 @@ export class MQTTClient extends EventEmitter {
       
       this.emit('error', error);
     }
+  }
+
+  /**
+   * Publish the Iris sync queue request.
+   *
+   * Real Messenger Web behavior: after CONNACK, the client publishes to
+   * `/messenger_sync_create_queue` (fresh sync, no prior position) or
+   * `/messenger_sync_get_diffs` (resume from a known position) so the
+   * server starts streaming the message backlog over `/t_ms`.
+   *
+   * Only a real irisSeqId extracted from Facebook is ever used here — if
+   * none is available yet, a fresh queue is created and the server assigns
+   * a starting position; no sequence id is ever fabricated.
+   */
+  private sendSyncQueue(): void {
+    const hasRealSeqId = !!this.session.irisSeqId && this.session.irisSeqId !== '0';
+    const topic = hasRealSeqId ? '/messenger_sync_get_diffs' : '/messenger_sync_create_queue';
+
+    const basePayload: Record<string, unknown> = {
+      sync_api_version: 10,
+      max_deltas_able_to_process: 1000,
+      delta_batch_size: 500,
+      encoding: 'JSON',
+      entity_fbid: this.session.userId,
+    };
+
+    const payload = hasRealSeqId
+      ? { ...basePayload, last_seq_id: this.session.irisSeqId }
+      : { ...basePayload, initial_titan_sequence_id: null, device_params: null };
+
+    logger.logMQTT('sending Iris sync queue request', { topic, hasRealSeqId });
+
+    this.publish(topic, JSON.stringify(payload), 1);
   }
  
   /**
@@ -586,56 +628,25 @@ export class MQTTClient extends EventEmitter {
   }
  
   /**
-   * Build broker URL
+   * Build broker URL.
+   *
+   * The real Messenger Web client's WebSocket URL only carries the MQTT
+   * session id (`sid`), the client id (`cid`) and a region hint — it does
+   * NOT carry the Iris sync sequence id. Message backlog resumption happens
+   * *after* CONNACK via a `/messenger_sync_create_queue` (fresh) or
+   * `/messenger_sync_get_diffs` (resume) PUBLISH — see `sendSyncQueue()`.
+   * Putting irisSeqId in the URL (the previous behavior) is not part of the
+   * real protocol and was never validated by the broker either way.
    */
   private buildBrokerUrl(): string {
-    // Use Facebook's MQTT broker with session credentials
     const baseUrl = MQTT_BROKER_URLS[0];
-    
-    // Only use a real irisSeqId extracted from Facebook. Do not fabricate one:
-    // a guessed value (e.g. a timestamp) is not a valid position in Iris's
-    // sequence stream and can cause the broker to reject the connection or
-    // silently skip messages that were never actually synced.
-    const hasRealSeqId = !!this.session.irisSeqId && this.session.irisSeqId !== '0';
-    if (!hasRealSeqId) {
-      logger.warn('No real irisSeqId available for MQTT connect; connecting without sid/seq (broker will treat this as a fresh sync)', {
-        userId: this.session.userId,
-      });
-    }
  
-    // Subscribe topics for URL params (broker uses these for initial filtering)
-    const topics = [
-      MQTT_TOPICS.MESSAGE_SYNC,
-      MQTT_TOPICS.RTC,
-      MQTT_TOPICS.PRESENCE,
-      MQTT_TOPICS.TYPING,
-      MQTT_TOPICS.GRAPHQL,
-      MQTT_TOPICS.MESSAGING_EVENTS,
-      MQTT_TOPICS.NOTIFY,
-      MQTT_TOPICS.REGION_HINT,
-      MQTT_TOPICS.ORCA_PRESENCE,
-      MQTT_TOPICS.ORCA_TYPING,
-      MQTT_TOPICS.ORCA_MESSAGES,
-      MQTT_TOPICS.WEBRTC,
-      MQTT_TOPICS.WEBRTC_RESPONSE,
-      `mqtt_c2b_${this.session.userId}`,
-      MQTT_TOPICS.SUBSCRIPTION,
-      MQTT_TOPICS.ADMIN_TEXT,
-      MQTT_TOPICS.PRESENCE_EXTENDED,
-      MQTT_TOPICS.MESSAGE_BODY,
-      MQTT_TOPICS.DELTA,
-    ];
-    
     // Build URL manually to avoid URLSearchParams truncation issues
     // IMPORTANT: Do not use URLSearchParams as it truncates long user IDs
     const params = [
+      `sid=${this.mqttSessionId}`,
       `cid=${this.clientId}`,
-      ...(hasRealSeqId ? [`sid=${this.session.irisSeqId}`, `seq=${this.session.irisSeqId}`] : []),
-      `user=${this.session.userId}`,
-      `device_id=${this.session.deviceId || ''}`,
-      'initial_connection=true',
-      'bus_version=3',
-      `subscribe_topics=${topics.join(',')}`,
+      `region=${(this.session.region || 'PRN').toLowerCase()}`,
     ];
     
     return `${baseUrl}?${params.join('&')}`;
@@ -731,35 +742,67 @@ export class MQTTClient extends EventEmitter {
   }
  
   /**
-   * Build CONNECT packet
+   * Build CONNECT packet.
+   *
+   * ROOT CAUSE OF THE CONNECTION TIMEOUT: Facebook's Messenger MQTT broker
+   * speaks MQTT 3.1 — protocol name "MQIsdp", protocol level 3 — and
+   * authenticates the session through a JSON object placed in the CONNECT
+   * packet's `username` field (u, s, cp, ecp, chat_on, fg, d, ct, aid,
+   * mqtt_sid, st, pm, dc, no_auto_fg, gas, pack). The previous
+   * implementation sent a bare MQTT 3.1.1 ("MQTT"/level 4) CONNECT with no
+   * username at all, which the broker rejects at the transport level
+   * (closing the raw socket) before ever emitting a CONNACK — exactly the
+   * "wsState: CLOSED" / connection-timeout symptom that was observed.
    */
   private buildConnectPacket(): Buffer {
-    // MQTT CONNECT packet
-    const protocolName = Buffer.from('MQTT');
-    const protocolLevel = 4; // MQTT 3.1.1
+    const protocolName = Buffer.from('MQIsdp');
+    const protocolLevel = 3; // MQTT 3.1 (Facebook does not accept 3.1.1)
     
-    // Connect flags: bit 1 = Clean Session
-    const connectFlags = 0x02; // Clean session only
+    // Connect flags: bit 7 = Username present, bit 1 = Clean Session
+    const connectFlags = 0x82;
     
-    // Keep alive
     const keepAlive = MQTT_DEFAULT_OPTIONS.keepalive;
     
-    // Client ID
     const clientIdBuf = Buffer.from(this.clientId, 'utf-8');
     const clientIdLength = Buffer.alloc(2);
     clientIdLength.writeUInt16BE(clientIdBuf.length);
+
+    // Username payload: real session data only — the user's actual FB id,
+    // the actual device id issued during login, and this connection's
+    // randomly generated MQTT session id. No fabricated/guessed fields.
+    const usernamePayload = JSON.stringify({
+      u: this.session.userId,
+      s: this.mqttSessionId,
+      cp: 3,
+      ecp: 10,
+      chat_on: true,
+      fg: false,
+      d: this.session.deviceId,
+      ct: 'websocket',
+      aid: MQTT_WEB_APP_ID,
+      mqtt_sid: this.mqttSessionId,
+      st: [],
+      pm: [],
+      dc: '',
+      no_auto_fg: true,
+      gas: null,
+      pack: [],
+    });
+    const usernameBuf = Buffer.from(usernamePayload, 'utf-8');
+    const usernameLength = Buffer.alloc(2);
+    usernameLength.writeUInt16BE(usernameBuf.length);
     
     // Build variable header
     const variableHeader = Buffer.concat([
-      Buffer.from([0, 4]), // Protocol name length (2 bytes)
-      protocolName, // "MQTT" (4 bytes)
+      Buffer.from([0, protocolName.length]), // Protocol name length (2 bytes)
+      protocolName, // "MQIsdp" (6 bytes)
       Buffer.from([protocolLevel]), // Protocol level (1 byte)
       Buffer.from([connectFlags]), // Connect flags (1 byte)
       Buffer.from([(keepAlive >> 8) & 0xFF, keepAlive & 0xFF]), // Keep alive (2 bytes)
     ]);
     
-    // Build payload
-    const payload = Buffer.concat([clientIdLength, clientIdBuf]);
+    // Build payload: clientId + username (no password field is sent)
+    const payload = Buffer.concat([clientIdLength, clientIdBuf, usernameLength, usernameBuf]);
     
     // Calculate remaining length (variable header + payload)
     const remainingLength = variableHeader.length + payload.length;
@@ -773,6 +816,9 @@ export class MQTTClient extends EventEmitter {
     
     logger.debug('MQTT CONNECT packet', {
       clientId: this.clientId,
+      protocolName: protocolName.toString(),
+      protocolLevel,
+      mqttSessionId: this.mqttSessionId,
       remainingLength,
       fixedHeaderLength: fixedHeader.length,
       variableHeaderLength: variableHeader.length,

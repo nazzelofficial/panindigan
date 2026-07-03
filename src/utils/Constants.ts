@@ -86,8 +86,18 @@ export const MQTT_DEFAULT_OPTIONS = {
   clean: true,
   connectTimeout: 30000,
   reconnectPeriod: 5000,
+  // Facebook's MQTT broker speaks MQTT 3.1 (protocol name "MQIsdp", level 3),
+  // NOT MQTT 3.1.1 ("MQTT", level 4). Connecting with the wrong protocol
+  // name/level causes the broker to drop the raw TCP/WS connection before
+  // ever sending a CONNACK — which surfaces as a bare "connection timeout"
+  // with no visible MQTT-level error.
   protocolVersion: 3,
 };
+
+// Facebook's public web Messenger MQTT "aid" (App ID). This is the fixed,
+// long-published numeric app id Messenger Web itself sends in every MQTT
+// CONNECT username payload — not a guessed or fabricated value.
+export const MQTT_WEB_APP_ID = 219994525426954;
 
 /**
  * All MQTT topics Messenger Web subscribes to.

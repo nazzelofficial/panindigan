@@ -35,6 +35,19 @@ export function generateDeviceId(): string {
 }
 
 /**
+ * Generate a random MQTT session identifier ("s" / "mqtt_sid" field and
+ * the broker URL's "sid" param).
+ *
+ * Facebook's Messenger MQTT broker expects a random per-connection integer
+ * here — it is NOT the Iris sync sequence id. Using a random 53-bit-safe
+ * integer mirrors what the real Messenger Web client generates on every
+ * fresh MQTT connect.
+ */
+export function generateMqttSessionId(): number {
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+/**
  * Generate jazoest value from fb_dtsg
  */
 export function generateJazoest(fbDtsg: string): string {

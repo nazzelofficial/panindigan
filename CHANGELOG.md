@@ -5,6 +5,20 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] - 2026-07-03
+
+### Fixed
+
+#### MQTT (`src/mqtt/MQTTClient.ts`, `src/mqtt/FastMQTT.ts`)
+- **Root cause of `MQTT connection timeout` / `wsState: CLOSED`** — the client was sending a bare MQTT 3.1.1 CONNECT packet (protocol name `"MQTT"`, level `4`) with no `username` field. Facebook's chat broker (`edge-chat.facebook.com`) only speaks **MQTT 3.1** (protocol name `"MQIsdp"`, level `3`) and requires session/device data to be passed as a JSON object in the CONNECT packet's `username` field; a mismatched protocol name/level with no username causes the broker to close the raw WebSocket before ever sending a CONNACK, which surfaced as an opaque connection timeout with no MQTT-level error. `buildConnectPacket()` now sends protocol name `MQIsdp` / level `3`, sets the username-present connect flag, and encodes a `username` JSON payload (`u`, `s`, `cp`, `ecp`, `chat_on`, `fg`, `d`, `ct`, `aid`, `mqtt_sid`, `st`, `pm`, `dc`, `no_auto_fg`, `gas`, `pack`) built entirely from real session data (`session.userId`, `session.deviceId`) plus Facebook's long-published web Messenger app id — no fabricated or guessed fields.
+- **Missing `Sec-WebSocket-Protocol: mqtt` negotiation** — the WebSocket upgrade request never declared the `mqtt` subprotocol, which Facebook's broker requires to accept the connection as an MQTT-over-WebSocket session; the socket would otherwise be dropped post-upgrade. Both clients now open the WebSocket with `'mqtt'` as the negotiated subprotocol and disable `permessage-deflate` (matching what Messenger Web actually negotiates).
+- **`irisSeqId` misused as a broker URL parameter** — the previous `sid`/`seq` query params on the WebSocket URL were derived from the Iris sync sequence id, which is not a valid MQTT session identifier and is not part of the real protocol's connection URL. `buildBrokerUrl()` now sends a randomly generated per-connection MQTT session id (`sid`), the MQTT `cid`, and a `region` hint (from real session data) — matching Messenger Web's actual WebSocket URL shape.
+- **Message backlog never resumed after connect** — there was no post-CONNACK Iris sync request, so the broker had no instruction to start streaming the message backlog over `/t_ms`. Added `sendSyncQueue()`, called right after CONNACK: publishes to `/messenger_sync_create_queue` for a fresh session, or `/messenger_sync_get_diffs` with the real `irisSeqId` (as `last_seq_id`) when one was actually extracted from Facebook. No sequence id is ever fabricated — a fresh queue is created whenever a real one isn't available yet.
+
+#### Utilities (`src/utils/Helpers.ts`, `src/utils/Constants.ts`)
+- Added `generateMqttSessionId()` — generates the random per-connection MQTT session id required by the CONNECT `username` payload and the broker URL's `sid` param (distinct from, and no longer conflated with, the Iris sync sequence id).
+- Added `MQTT_WEB_APP_ID` (`219994525426954`) — Facebook's fixed, long-published web Messenger MQTT app id, sent as `aid` in every CONNECT username payload.
+
 ## [1.2.4] - 2026-07-03
 
 ### Fixed
@@ -13,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **False-positive checkpoint on any 302** — `inspectUrl()` was using `statusCode === 302 || url.includes(signal)` meaning *any* redirect (including a successful post-login redirect) triggered a checkpoint error; corrected to `hasCheckpointSignal` only, so a 302 without a known checkpoint path is not treated as a checkpoint
 
 #### Errors (`src/errors/index.ts`)
-- **Missing `UnsupportedOperationError`** — added typed `UnsupportedOperationError extends PanindiganError` (code `NOT_IMPLEMENTED`, non-retryable) and exported it from `src/index.ts`
+- **Missing `NotImplementedError`** — added typed `NotImplementedError extends PanindiganError` (code `NOT_IMPLEMENTED`, non-retryable) and exported it from `src/index.ts`
 
 #### API (`src/api/RequestHandler.ts`)
 - **Dead `CircuitBreaker` and `RateLimiter`** — `executeRequest()` was completely bypassing both subsystems; now calls `rateLimiter.tryConsume()` before the fetch and wraps the fetch inside `circuitBreaker.execute()` so failures trip the breaker and rate exhaustion throws a typed `RateLimitError`
@@ -71,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`getPresence` missing from main API surface** — `UserManager.getPresence()` was implemented but not delegated through `PanindiganFCA`; added `getPresence(userId): Promise<Presence>` wrapper (spec §13: every manager method must be exposed)
 
 #### Exports (`src/index.ts`)
-- Added `UnsupportedOperationError` to the public error class exports
+- Added `NotImplementedError` to the public error class exports
 
 ## [1.2.3] - 2026-07-02
 
