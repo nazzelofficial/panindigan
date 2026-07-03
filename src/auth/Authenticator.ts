@@ -39,8 +39,9 @@ export class Authenticator {
       options.proxy
     );
     
-    // Initialize session manager
+    // Initialize session manager and wire it to the authenticated handler
     this.sessionManager = new SessionManager(cookieJar, options.sessionPath);
+    this.sessionManager.setRequestHandler(this.requestHandler);
     
     // Initialize GraphQL client
     this.graphqlClient = new GraphQLClient(this.requestHandler);

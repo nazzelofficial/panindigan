@@ -18,10 +18,24 @@ export class RequestCache {
   private cache: Map<string, CacheEntry<unknown>> = new Map();
   private defaultTTL: number;
   private maxSize: number;
+  private cleanupTimer: ReturnType<typeof setInterval>;
 
   constructor(options: CacheOptions = {}) {
     this.defaultTTL = options.defaultTTL ?? 300000; // 5 minutes
     this.maxSize = options.maxSize ?? 1000;
+
+    // Periodically evict expired entries so the map doesn't grow unboundedly
+    // even when entries are never accessed after insertion.
+    this.cleanupTimer = setInterval(() => {
+      this.cleanExpired();
+    }, 300_000); // every 5 minutes
+    // Allow Node.js to exit even if this timer is still running
+    this.cleanupTimer.unref?.();
+  }
+
+  /** Stop the background cleanup timer (call in tests or when discarding the cache). */
+  destroy(): void {
+    clearInterval(this.cleanupTimer);
   }
 
   /**

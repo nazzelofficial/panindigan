@@ -21,6 +21,15 @@ export { FastMQTT, type FastMQTTOptions } from './mqtt/FastMQTT.js';
 
 // Security
 export { AntiSuspension, type AntiSuspensionOptions } from './security/AntiSuspension.js';
+export { EntropyPool, type EntropyPoolOptions } from './security/EntropyPool.js';
+export {
+  CheckpointGuard,
+  type CheckpointGuardOptions,
+  type CheckpointCallback,
+  type GuardState,
+  type BurstLevel,
+  type GuardStats,
+} from './security/CheckpointGuard.js';
 
 // Multi-Account
 export { MultiAccountManager, type AccountConfig, type AccountInstance } from './core/MultiAccountManager.js';
@@ -43,6 +52,25 @@ export { CircuitBreaker, type CircuitBreakerOptions, CircuitState } from './util
 export { RequestCache, type CacheOptions, type CacheEntry } from './utils/RequestCache.js';
 export { RateLimiter, type RateLimiterOptions } from './utils/RateLimiter.js';
 export { MessageQueue, type QueuedMessage, type MessageQueueOptions } from './utils/MessageQueue.js';
+
+// Error Classes (concrete, throwable)
+export {
+  PanindiganError,
+  AuthenticationError,
+  CheckpointError,
+  MQTTError,
+  RateLimitError,
+  NetworkError,
+  UploadError,
+  MessageError,
+  ThreadError,
+  UserError,
+  GraphQLError as GraphQLRequestError,
+  SessionExpiredError,
+  TwoFactorRequiredError,
+  TimeoutError,
+  UnsupportedOperationError,
+} from './errors/index.js';
 
 // Type Exports
 export type {

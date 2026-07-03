@@ -2,7 +2,7 @@
  * Event Types for MQTT and Real-time System
  */
 
-export type EventType = 
+export type EventType =
   | 'message'
   | 'message_reaction'
   | 'message_reply'
@@ -32,6 +32,8 @@ export type EventType =
   | 'story'
   | 'poll'
   | 'event'
+  | 'region_hint'
+  | 'raw'
   | 'connect'
   | 'disconnect'
   | 'error';
@@ -44,6 +46,28 @@ export interface BaseEvent {
 export interface MessageEvent extends BaseEvent {
   type: 'message';
   message: import('./messages.js').Message;
+}
+
+export interface MessageReplyEvent extends BaseEvent {
+  type: 'message_reply';
+  message: import('./messages.js').Message;
+  replyTo: import('./messages.js').MessageReply;
+}
+
+export interface MessageEditEvent extends BaseEvent {
+  type: 'message_edit';
+  threadId: string;
+  messageId: string;
+  userId: string;
+  body: string;
+  editedAt: number;
+}
+
+export interface MessageUnsendEvent extends BaseEvent {
+  type: 'message_unsend';
+  threadId: string;
+  messageId: string;
+  userId: string;
 }
 
 export interface MessageReactionEvent extends BaseEvent {
@@ -132,6 +156,13 @@ export interface ThreadAdminEvent extends BaseEvent {
   participantIds: string[];
 }
 
+export interface ThreadApprovalEvent extends BaseEvent {
+  type: 'thread_approval_mode';
+  threadId: string;
+  author: string;
+  enabled: boolean;
+}
+
 export interface ThreadLeaveEvent extends BaseEvent {
   type: 'thread_leave';
   threadId: string;
@@ -195,6 +226,17 @@ export interface EventPlannerEvent extends BaseEvent {
   data?: unknown;
 }
 
+export interface RegionHintEvent extends BaseEvent {
+  type: 'region_hint';
+  region: string;
+}
+
+export interface RawEvent extends BaseEvent {
+  type: 'raw';
+  topic: string;
+  payload: Buffer;
+}
+
 export interface ConnectEvent extends BaseEvent {
   type: 'connect';
 }
@@ -213,6 +255,9 @@ export interface ErrorEvent extends BaseEvent {
 
 export type PanindiganEvent =
   | MessageEvent
+  | MessageReplyEvent
+  | MessageEditEvent
+  | MessageUnsendEvent
   | MessageReactionEvent
   | TypingEvent
   | ReadReceiptEvent
@@ -225,6 +270,7 @@ export type PanindiganEvent =
   | ThreadNicknameEvent
   | ThreadParticipantsEvent
   | ThreadAdminEvent
+  | ThreadApprovalEvent
   | ThreadLeaveEvent
   | FriendRequestEvent
   | FriendAcceptEvent
@@ -234,6 +280,8 @@ export type PanindiganEvent =
   | StoryEvent
   | PollEvent
   | EventPlannerEvent
+  | RegionHintEvent
+  | RawEvent
   | ConnectEvent
   | DisconnectEvent
   | ErrorEvent;
@@ -242,6 +290,9 @@ export type EventListener<T extends PanindiganEvent> = (event: T) => void | Prom
 
 export interface EventHandlerMap {
   message: MessageEvent;
+  message_reply: MessageReplyEvent;
+  message_edit: MessageEditEvent;
+  message_unsend: MessageUnsendEvent;
   message_reaction: MessageReactionEvent;
   typ: TypingEvent;
   read_receipt: ReadReceiptEvent;
@@ -256,6 +307,7 @@ export interface EventHandlerMap {
   thread_remove_participants: ThreadParticipantsEvent;
   thread_promote: ThreadAdminEvent;
   thread_demote: ThreadAdminEvent;
+  thread_approval_mode: ThreadApprovalEvent;
   thread_leave: ThreadLeaveEvent;
   friend_request: FriendRequestEvent;
   friend_accept: FriendAcceptEvent;
@@ -266,6 +318,8 @@ export interface EventHandlerMap {
   story: StoryEvent;
   poll: PollEvent;
   event: EventPlannerEvent;
+  region_hint: RegionHintEvent;
+  raw: RawEvent;
   connect: ConnectEvent;
   disconnect: DisconnectEvent;
   error: ErrorEvent;

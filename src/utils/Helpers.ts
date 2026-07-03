@@ -2,7 +2,7 @@
  * Helper Utilities for Panindigan
  */
 
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 
 let _clientMutationId = 0;
 
@@ -14,14 +14,10 @@ export function generateRandomString(length: number = 16): string {
 }
 
 /**
- * Generate a UUID v4
+ * Generate a UUID v4 using Node.js built-in CSPRNG.
  */
 export function generateUUID(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  return randomUUID();
 }
 
 /**
@@ -53,10 +49,11 @@ export function generateJazoest(fbDtsg: string): string {
  * Generate a real Messenger offline threading ID.
  * Upper 42 bits = current time in ms, lower 22 bits = random.
  * This matches the format Facebook's own clients generate.
+ * Prefer EntropyPool.nextOfflineId() in hot paths — it uses CSPRNG pre-fill.
  */
 export function generateOfflineThreadingId(): string {
   const now = BigInt(Date.now());
-  const random = BigInt(Math.floor(Math.random() * 0x3FFFFF));
+  const random = BigInt(randomBytes(3).readUIntBE(0, 3) & 0x3FFFFF);
   return ((now << 22n) | random).toString();
 }
 
@@ -172,17 +169,17 @@ export function formatThreadId(id: string): string {
 }
 
 /**
- * Check if ID is a group/thread ID
+ * Check if ID looks like a group thread ID (17+ digits)
  */
 export function isGroupId(id: string): boolean {
-  return /^\d{15,16}$/.test(id);
+  return /^\d{17,}$/.test(id);
 }
 
 /**
- * Check if ID is a user ID
+ * Check if ID looks like a user ID (numeric, reasonable length)
  */
 export function isUserId(id: string): boolean {
-  return /^\d{15}$/.test(id);
+  return /^\d{8,20}$/.test(id);
 }
 
 /**
@@ -193,12 +190,13 @@ export function generateRequestId(): string {
 }
 
 /**
- * Generate __req parameter
+ * Generate __req parameter — base-26 representation of (timestamp + random jitter)
+ * so two rapid calls within the same millisecond still produce different values.
  */
 export function generateReqParam(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz';
   let result = '';
-  let num = Date.now();
+  let num = Date.now() + Math.floor(Math.random() * 9999);
   while (num > 0) {
     result = chars[num % 26] + result;
     num = Math.floor(num / 26);

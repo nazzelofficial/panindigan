@@ -4,7 +4,8 @@
  */
 
 import { logger } from './Logger.js';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { writeFile } from 'fs/promises';
 
 export interface QueuedMessage {
   id: string;
@@ -172,16 +173,17 @@ export class MessageQueue {
   }
 
   /**
-   * Save queue to disk
+   * Save queue to disk asynchronously (fire-and-forget).
+   * Using async I/O prevents blocking the event loop on every enqueue/dequeue.
    */
   private saveToDisk(): void {
     if (!this.persistencePath) return;
 
-    try {
-      writeFileSync(this.persistencePath, JSON.stringify(this.queue), 'utf-8');
-    } catch (error) {
+    const path = this.persistencePath;
+    const data = JSON.stringify(this.queue);
+    writeFile(path, data, 'utf-8').catch((error) => {
       logger.error('Failed to save message queue to disk', error);
-    }
+    });
   }
 
   /**

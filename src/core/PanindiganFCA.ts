@@ -10,8 +10,21 @@ import { MessageSender } from '../messaging/MessageSender.js';
 import { ThreadManager } from '../threads/ThreadManager.js';
 import { UserManager } from '../users/UserManager.js';
 import { MediaUploader } from '../media/MediaUploader.js';
+import { CheckpointGuard } from '../security/CheckpointGuard.js';
+import { EntropyPool } from '../security/EntropyPool.js';
 import { logger } from '../utils/Logger.js';
-import { REACTION_EMOJIS } from '../utils/Constants.js';
+import {
+  FACEBOOK_CREATE_POLL_URL,
+  FACEBOOK_UPDATE_POLL_URL,
+  FACEBOOK_POLL_RESULTS_URL,
+  FACEBOOK_CREATE_EVENT_URL,
+  FACEBOOK_RSVP_EVENT_URL,
+  FACEBOOK_STORIES_URL,
+  FACEBOOK_VIEW_STORY_URL,
+  FACEBOOK_INITIATE_CALL_URL,
+} from '../utils/Constants.js';
+import { SessionExpiredError, MessageError } from '../errors/index.js';
+import type { CheckpointCallback, GuardState, BurstLevel, GuardStats } from '../security/CheckpointGuard.js';
 import type {
   LoginOptions,
   Session,
@@ -43,6 +56,12 @@ import type {
   GetFriendsResult,
   GetBlockedListResult,
   GetBirthdaysResult,
+  Presence,
+  MessageSearchOptions,
+  MessageSearchResult,
+  User,
+  FriendRequest,
+  RawEvent,
 } from '../types/index.js';
 
 export interface PanindiganFCAOptions extends LoginOptions {
@@ -61,16 +80,37 @@ export class PanindiganFCA extends EventEmitter {
   private userManager: UserManager;
   private mediaUploader: MediaUploader;
 
+  // Security subsystems
+  private checkpointGuard: CheckpointGuard;
+  private entropyPool: EntropyPool;
+
   constructor(options: PanindiganFCAOptions = {}) {
     super();
     this.options = options;
     this.authenticator = new Authenticator(options);
 
-    // Managers are created here and share the same GraphQLClient instance
+    // ── Security subsystems ──────────────────────────────────────────────────
+    this.checkpointGuard = new CheckpointGuard();
+    this.entropyPool     = new EntropyPool();
+
+    // Forward checkpoint events to the EventEmitter so callers can listen
+    this.checkpointGuard.onCheckpoint((url, err) => {
+      logger.error('Checkpoint detected — stopping outbound sends', { url });
+      this.emit('checkpoint', { url, error: err });
+    });
+
+    // ── Managers — all share the same GraphQLClient ──────────────────────────
     const gql = this.authenticator.getGraphQLClient();
+
+    // Wire security into the HTTP stack
+    gql.setCheckpointGuard(this.checkpointGuard);
+
     this.messageSender = new MessageSender(gql);
+    this.messageSender.setCheckpointGuard(this.checkpointGuard);
+    this.messageSender.setEntropyPool(this.entropyPool);
+
     this.threadManager = new ThreadManager(gql);
-    this.userManager = new UserManager(gql);
+    this.userManager   = new UserManager(gql);
     this.mediaUploader = new MediaUploader(gql);
 
     if (options.logLevel) {
@@ -216,22 +256,11 @@ export class PanindiganFCA extends EventEmitter {
   }
 
   /**
-   * Edit a message (GraphQL — no stable form endpoint)
+   * Edit a message via real /messaging/edit_message/ endpoint
    */
   async editMessage(messageId: string, newText: string): Promise<boolean> {
     this.requireLogin();
-    logger.debug('Editing message', { messageId });
-
-    try {
-      await this.authenticator.getGraphQLClient().mutation(
-        'MessageEditMutation',
-        { message_id: messageId, body: newText }
-      );
-      return true;
-    } catch (error) {
-      logger.error('Failed to edit message', error);
-      return false;
-    }
+    return this.messageSender.editMessage(messageId, newText);
   }
 
   /**
@@ -250,44 +279,19 @@ export class PanindiganFCA extends EventEmitter {
     reaction: ReactionType | null
   ): Promise<boolean> {
     this.requireLogin();
-    // Convert canonical name to emoji string (or null to remove reaction)
-    const emoji = reaction ? (REACTION_EMOJIS[reaction] ?? reaction) : null;
-    return this.messageSender.reactToMessage(messageId, emoji);
+    return this.messageSender.reactToMessage(messageId, reaction);
   }
 
   /**
-   * Forward a message (GraphQL)
+   * Forward a message via real /messaging/forward_message/ endpoint
    */
   async forwardMessage(
     messageId: string,
-    threadId: string
+    threadId: string,
+    isGroup: boolean = true
   ): Promise<SendMessageResult> {
     this.requireLogin();
-    logger.debug('Forwarding message', { messageId, threadId });
-
-    try {
-      const result = await this.authenticator
-        .getGraphQLClient()
-        .mutation<{
-          forward_message: {
-            message: { message_id: string; timestamp: number };
-          };
-        }>('MessageForwardMutation', {
-          message_id: messageId,
-          thread_id: threadId,
-        });
-
-      return {
-        messageId:
-          result?.forward_message?.message?.message_id || `fwd_${Date.now()}`,
-        timestamp:
-          result?.forward_message?.message?.timestamp || Date.now(),
-        threadId,
-      };
-    } catch (error) {
-      logger.error('Failed to forward message', error);
-      throw error;
-    }
+    return this.messageSender.forwardMessage(messageId, threadId, isGroup);
   }
 
   /**
@@ -302,11 +306,29 @@ export class PanindiganFCA extends EventEmitter {
   }
 
   /**
+   * Search messages in a thread
+   */
+  async searchMessages(
+    options: MessageSearchOptions
+  ): Promise<MessageSearchResult> {
+    this.requireLogin();
+    return this.threadManager.searchMessages(options);
+  }
+
+  /**
    * Mark messages as read via real /ajax/mercury/change_read_status.php
    */
   async markAsRead(threadId: string): Promise<boolean> {
     this.requireLogin();
     return this.messageSender.markAsRead(threadId);
+  }
+
+  /**
+   * Send delivery receipt via real /ajax/mercury/delivery_receipts.php
+   */
+  async markAsDelivered(threadId: string, messageId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.messageSender.markAsDelivered(threadId, messageId);
   }
 
   /**
@@ -392,6 +414,76 @@ export class PanindiganFCA extends EventEmitter {
     return this.threadManager.changeThreadEmoji(threadId, emoji);
   }
 
+  /**
+   * Change the group photo via real /messaging/set_thread_image/ endpoint.
+   * Pass a pre-uploaded image attachment ID (from uploadImage).
+   */
+  async changeThreadImage(
+    threadId: string,
+    imageAttachmentId: string
+  ): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.setThreadImage(threadId, imageAttachmentId);
+  }
+
+  /**
+   * Enable or disable join approval mode for a group
+   */
+  async setApprovalMode(threadId: string, enabled: boolean): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.setApprovalMode(threadId, enabled);
+  }
+
+  /**
+   * Get the invite link for a group
+   */
+  async getInviteLink(threadId: string): Promise<string | null> {
+    this.requireLogin();
+    return this.threadManager.getInviteLink(threadId);
+  }
+
+  /**
+   * Join a group via an invite link
+   */
+  async joinByInviteLink(link: string): Promise<Thread | null> {
+    this.requireLogin();
+    return this.threadManager.joinByInviteLink(link);
+  }
+
+  /**
+   * Approve a pending join request
+   */
+  async approveMember(threadId: string, userId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.approveMember(threadId, userId);
+  }
+
+  /**
+   * Reject a pending join request
+   */
+  async rejectMember(threadId: string, userId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.rejectMember(threadId, userId);
+  }
+
+  async pinMessage(threadId: string, messageId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.pinMessage(threadId, messageId);
+  }
+
+  async unpinMessage(threadId: string, messageId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.unpinMessage(threadId, messageId);
+  }
+
+  /**
+   * Delete a message for yourself via /messaging/delete_message/
+   */
+  async deleteMessage(messageId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.deleteMessage(messageId);
+  }
+
   async leaveGroup(threadId: string): Promise<boolean> {
     this.requireLogin();
     return this.threadManager.leaveGroup(threadId);
@@ -408,6 +500,11 @@ export class PanindiganFCA extends EventEmitter {
   async muteThread(threadId: string, mute: boolean = true): Promise<boolean> {
     this.requireLogin();
     return this.threadManager.muteThread(threadId, mute);
+  }
+
+  async deleteThread(threadId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.threadManager.deleteThread(threadId);
   }
 
   // ==================== USERS ====================
@@ -452,9 +549,54 @@ export class PanindiganFCA extends EventEmitter {
     return this.userManager.declineFriendRequest(userId);
   }
 
+  async cancelFriendRequest(userId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.userManager.cancelFriendRequest(userId);
+  }
+
   async unfriend(userId: string): Promise<boolean> {
     this.requireLogin();
     return this.userManager.unfriend(userId);
+  }
+
+  /**
+   * Follow a user (subscribe to their public posts)
+   */
+  async followUser(userId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.userManager.followUser(userId);
+  }
+
+  /**
+   * Unfollow a user
+   */
+  async unfollowUser(userId: string): Promise<boolean> {
+    this.requireLogin();
+    return this.userManager.unfollowUser(userId);
+  }
+
+  /**
+   * Get mutual friends with a user
+   */
+  async getMutualFriends(userId: string): Promise<User[]> {
+    this.requireLogin();
+    return this.userManager.getMutualFriends(userId);
+  }
+
+  /**
+   * Get received (pending) friend requests
+   */
+  async getPendingFriendRequests(): Promise<FriendRequest[]> {
+    this.requireLogin();
+    return this.userManager.getPendingFriendRequests();
+  }
+
+  /**
+   * Get sent (outgoing) friend requests
+   */
+  async getSentFriendRequests(): Promise<FriendRequest[]> {
+    this.requireLogin();
+    return this.userManager.getSentFriendRequests();
   }
 
   async blockUser(userId: string): Promise<boolean> {
@@ -475,6 +617,15 @@ export class PanindiganFCA extends EventEmitter {
   async getBirthdays(): Promise<GetBirthdaysResult> {
     this.requireLogin();
     return this.userManager.getBirthdays();
+  }
+
+  /**
+   * Query per-user online presence via POST /ajax/mercury/chat_online_presences.php.
+   * For real-time bulk presence updates, listen to MQTT `presence` events instead.
+   */
+  async getPresence(userId: string): Promise<Presence> {
+    this.requireLogin();
+    return this.userManager.getPresence(userId);
   }
 
   // ==================== MEDIA ====================
@@ -524,56 +675,56 @@ export class PanindiganFCA extends EventEmitter {
 
   // ==================== POLLS ====================
 
+  /**
+   * Create a poll in a thread via POST /messaging/create_poll/
+   */
   async createPoll(options: CreatePollOptions): Promise<Poll> {
     this.requireLogin();
     logger.debug('Creating poll', options);
 
+    const form: Record<string, string> = {
+      thread_fbid: options.threadId,
+      question: options.question,
+      allows_multiple_choices: String(!!(options.allowsMultipleChoices)),
+    };
+    options.options.forEach((text, i) => {
+      form[`options[${i}]`] = text;
+    });
+    if (options.duration) {
+      form['duration'] = String(options.duration);
+    }
+
     try {
-      const result = await this.authenticator.getGraphQLClient().mutation<{
-        create_poll: {
-          poll: {
-            id: string;
-            question: string;
-            options: Array<{
-              id: string;
-              text: string;
-              vote_count: number;
-            }>;
-            total_votes: number;
-            is_closed: boolean;
-          };
+      const result = await this.authenticator.getGraphQLClient().formPost<{
+        payload?: {
+          poll_id?: string;
+          question?: string;
+          options?: Array<{ id: string; text: string; vote_count: number }>;
+          total_votes?: number;
+          is_closed?: boolean;
         };
-      }>('CreatePollMutation', {
-        thread_id: options.threadId,
-        question: options.question,
-        options: options.options,
-        allows_multiple_choices: options.allowsMultipleChoices || false,
-        duration: options.duration,
-      });
+      }>(FACEBOOK_CREATE_POLL_URL, form);
 
-      const poll = result?.create_poll?.poll;
-
+      const payload = result?.payload;
       return {
-        pollId: poll?.id || `poll_${Date.now()}`,
+        pollId: payload?.poll_id || `poll_${Date.now()}`,
         threadId: options.threadId,
         creatorId: this.getSession()?.userId || '',
-        question: poll?.question || options.question,
+        question: payload?.question || options.question,
         options:
-          poll?.options?.map(
-            (opt: { id: string; text: string; vote_count: number }) => ({
-              optionId: opt.id,
-              text: opt.text,
-              voteCount: opt.vote_count,
-            })
-          ) ||
+          payload?.options?.map((opt) => ({
+            optionId: opt.id,
+            text: opt.text,
+            voteCount: opt.vote_count,
+          })) ??
           options.options.map((text, idx) => ({
             optionId: `opt_${idx}`,
             text,
             voteCount: 0,
           })),
-        totalVotes: poll?.total_votes || 0,
-        isClosed: poll?.is_closed || false,
-        allowsMultipleChoices: options.allowsMultipleChoices || false,
+        totalVotes: payload?.total_votes ?? 0,
+        isClosed: payload?.is_closed ?? false,
+        allowsMultipleChoices: options.allowsMultipleChoices ?? false,
         createdAt: Date.now(),
       };
     } catch (error) {
@@ -582,13 +733,22 @@ export class PanindiganFCA extends EventEmitter {
     }
   }
 
+  /**
+   * Vote on a poll via POST /messaging/update_vote/
+   */
   async votePoll(pollId: string, optionIds: string[]): Promise<boolean> {
     this.requireLogin();
+
+    const form: Record<string, string> = { poll_id: pollId };
+    optionIds.forEach((id, i) => {
+      form[`option_ids[${i}]`] = id;
+    });
+
     try {
-      await this.authenticator.getGraphQLClient().mutation('VotePollMutation', {
-        poll_id: pollId,
-        option_ids: optionIds,
-      });
+      await this.authenticator.getGraphQLClient().formPost(
+        FACEBOOK_UPDATE_POLL_URL,
+        form
+      );
       return true;
     } catch (error) {
       logger.error('Failed to vote on poll', error);
@@ -596,57 +756,53 @@ export class PanindiganFCA extends EventEmitter {
     }
   }
 
+  /**
+   * Get poll results via POST /ajax/messaging/poll_info.php
+   */
   async getPollResults(pollId: string): Promise<Poll> {
     this.requireLogin();
     logger.debug('Getting poll results', { pollId });
 
     try {
-      const result = await this.authenticator.getGraphQLClient().query<{
-        poll: {
-          id: string;
-          thread_id: string;
-          creator_id: string;
-          question: string;
-          options: Array<{
-            id: string;
-            text: string;
-            vote_count: number;
+      const result = await this.authenticator.getGraphQLClient().formPost<{
+        payload?: {
+          poll_id?: string;
+          question?: string;
+          thread_id?: string;
+          creator_id?: string;
+          options?: Array<{
+            id?: string;
+            text?: string;
+            vote_count?: number;
             voters?: string[];
           }>;
-          total_votes: number;
-          is_closed: boolean;
-          allows_multiple_choices: boolean;
-          created_at: number;
-          closed_at?: number;
+          total_votes?: number;
+          is_closed?: boolean;
+          allows_multiple_choices?: boolean;
+          created_time?: number;
+          closed_time?: number;
         };
-      }>('PollQuery', { poll_id: pollId });
+      }>(FACEBOOK_POLL_RESULTS_URL, { poll_id: pollId });
 
-      const poll = result?.poll;
-      if (!poll) throw new Error('Poll not found');
+      const p = result?.payload;
+      if (!p) throw new MessageError(`Poll ${pollId} not found`);
 
       return {
-        pollId: poll.id,
-        threadId: poll.thread_id,
-        creatorId: poll.creator_id,
-        question: poll.question,
-        options: poll.options.map(
-          (opt: {
-            id: string;
-            text: string;
-            vote_count: number;
-            voters?: string[];
-          }) => ({
-            optionId: opt.id,
-            text: opt.text,
-            voteCount: opt.vote_count,
-            voters: opt.voters,
-          })
-        ),
-        totalVotes: poll.total_votes,
-        isClosed: poll.is_closed,
-        allowsMultipleChoices: poll.allows_multiple_choices,
-        createdAt: poll.created_at,
-        closedAt: poll.closed_at,
+        pollId: p.poll_id || pollId,
+        threadId: p.thread_id || '',
+        creatorId: p.creator_id || '',
+        question: p.question || '',
+        options: (p.options || []).map((opt) => ({
+          optionId: opt.id || '',
+          text: opt.text || '',
+          voteCount: opt.vote_count || 0,
+          voters: opt.voters,
+        })),
+        totalVotes: p.total_votes || 0,
+        isClosed: p.is_closed || false,
+        allowsMultipleChoices: p.allows_multiple_choices || false,
+        createdAt: p.created_time ? p.created_time * 1000 : Date.now(),
+        closedAt: p.closed_time ? p.closed_time * 1000 : undefined,
       };
     } catch (error) {
       logger.error('Failed to get poll results', error);
@@ -656,60 +812,57 @@ export class PanindiganFCA extends EventEmitter {
 
   // ==================== EVENTS ====================
 
+  /**
+   * Create a Messenger event planner via POST /messaging/create_event/
+   */
   async createEvent(options: CreateEventOptions): Promise<EventPlanner> {
     this.requireLogin();
     logger.debug('Creating event', options);
 
+    const form: Record<string, string> = {
+      thread_fbid: options.threadId,
+      title: options.name,
+      start_time: String(Math.floor(options.startTime / 1000)),
+    };
+    if (options.description) form['note'] = options.description;
+    if (options.location) form['location'] = options.location;
+    if (options.endTime) form['end_time'] = String(Math.floor(options.endTime / 1000));
+
     try {
-      const result = await this.authenticator.getGraphQLClient().mutation<{
-        create_event: {
-          event: {
-            id: string;
-            name: string;
-            description?: string;
-            location?: string;
-            start_time: number;
-            end_time?: number;
-            cover_image?: string;
-            guest_count: {
-              going: number;
-              maybe: number;
-              cant_go: number;
-              invited: number;
-            };
-          };
+      const result = await this.authenticator.getGraphQLClient().formPost<{
+        payload?: {
+          event_id?: string;
+          title?: string;
+          note?: string;
+          location?: string;
+          start_time?: number;
+          end_time?: number;
+          creator_id?: string;
+          going_count?: number;
+          maybe_count?: number;
+          cant_go_count?: number;
+          invited_count?: number;
+          is_cancelled?: boolean;
         };
-      }>('CreateEventMutation', {
-        thread_id: options.threadId,
-        name: options.name,
-        description: options.description,
-        location: options.location,
-        start_time: options.startTime,
-        end_time: options.endTime,
-        cover_image: options.coverImage,
-      });
+      }>(FACEBOOK_CREATE_EVENT_URL, form);
 
-      const event = result?.create_event?.event;
-
+      const ev = result?.payload;
       return {
-        eventId: event?.id || `event_${Date.now()}`,
+        eventId: ev?.event_id || `event_${Date.now()}`,
         threadId: options.threadId,
-        creatorId: this.getSession()?.userId || '',
-        name: event?.name || options.name,
-        description: event?.description || options.description,
-        location: event?.location || options.location,
-        startTime: event?.start_time || options.startTime,
-        endTime: event?.end_time || options.endTime,
-        coverImage: event?.cover_image,
-        guestCount: event?.guest_count
-          ? {
-              going: event.guest_count.going,
-              maybe: event.guest_count.maybe,
-              cantGo: event.guest_count.cant_go,
-              invited: event.guest_count.invited,
-            }
-          : { going: 0, maybe: 0, cantGo: 0, invited: 0 },
-        isCancelled: false,
+        creatorId: ev?.creator_id || this.getSession()?.userId || '',
+        name: ev?.title || options.name,
+        description: ev?.note || options.description,
+        location: ev?.location || options.location,
+        startTime: ev?.start_time ? ev.start_time * 1000 : options.startTime,
+        endTime: ev?.end_time ? ev.end_time * 1000 : options.endTime,
+        guestCount: {
+          going: ev?.going_count || 0,
+          maybe: ev?.maybe_count || 0,
+          cantGo: ev?.cant_go_count || 0,
+          invited: ev?.invited_count || 0,
+        },
+        isCancelled: ev?.is_cancelled || false,
       };
     } catch (error) {
       logger.error('Failed to create event', error);
@@ -717,16 +870,20 @@ export class PanindiganFCA extends EventEmitter {
     }
   }
 
+  /**
+   * RSVP to a Messenger event via POST /messaging/update_event_rsvp/
+   */
   async rsvpToEvent(
     eventId: string,
     response: 'going' | 'maybe' | 'cant_go'
   ): Promise<boolean> {
     this.requireLogin();
+
     try {
-      await this.authenticator.getGraphQLClient().mutation('RSVPEventMutation', {
-        event_id: eventId,
-        response,
-      });
+      await this.authenticator.getGraphQLClient().formPost(
+        FACEBOOK_RSVP_EVENT_URL,
+        { event_id: eventId, rsvp_status: response }
+      );
       return true;
     } catch (error) {
       logger.error('Failed to RSVP to event', error);
@@ -736,71 +893,72 @@ export class PanindiganFCA extends EventEmitter {
 
   // ==================== STORIES ====================
 
+  /**
+   * Get stories for the authenticated user or a specific user
+   * via POST /ajax/stories/
+   */
   async getStories(userId?: string): Promise<Story[]> {
     this.requireLogin();
     logger.debug('Getting stories', { userId });
 
     try {
-      const result = await this.authenticator.getGraphQLClient().query<{
-        stories: Array<{
-          id: string;
-          author_id: string;
-          author_name: string;
-          type: 'image' | 'video' | 'text';
-          url?: string;
-          thumbnail_url?: string;
-          text?: string;
-          timestamp: number;
-          expires_at: number;
-          seen_by: string[];
-          reactions: Array<{ user_id: string; reaction: string }>;
-        }>;
-      }>('StoriesQuery', { user_id: userId });
+      const params: Record<string, string> = { action: 'get_stories' };
+      if (userId) params['user_id'] = userId;
 
-      return (result?.stories || []).map(
-        (s: {
-          id: string;
-          author_id: string;
-          author_name: string;
-          type: 'image' | 'video' | 'text';
-          url?: string;
-          thumbnail_url?: string;
-          text?: string;
-          timestamp: number;
-          expires_at: number;
-          seen_by: string[];
-          reactions: Array<{ user_id: string; reaction: string }>;
-        }) => ({
-          storyId: s.id,
-          authorId: s.author_id,
-          authorName: s.author_name,
-          type: s.type,
-          url: s.url,
-          thumbnailUrl: s.thumbnail_url,
-          text: s.text,
-          timestamp: s.timestamp,
-          expiresAt: s.expires_at,
-          seenBy: s.seen_by,
-          reactions: s.reactions.map(
-            (r: { user_id: string; reaction: string }) => ({
-              userId: r.user_id,
-              reaction: r.reaction,
-            })
-          ),
-        })
-      );
+      const result = await this.authenticator.getGraphQLClient().formPost<{
+        payload?: {
+          stories?: Array<{
+            id?: string;
+            story_id?: string;
+            author_fbid?: string;
+            author_name?: string;
+            type?: string;
+            url?: string;
+            thumbnail_url?: string;
+            text?: string;
+            creation_time?: number;
+            expiration_time?: number;
+            seen_by?: string[];
+            reactions?: Array<{ user_id?: string; reaction?: string }>;
+          }>;
+        };
+      }>(FACEBOOK_STORIES_URL, params);
+
+      return (result?.payload?.stories || []).map((s) => ({
+        storyId: s.id || s.story_id || '',
+        authorId: s.author_fbid || '',
+        authorName: s.author_name || 'Unknown',
+        type: (s.type as 'image' | 'video' | 'text') || 'image',
+        url: s.url,
+        thumbnailUrl: s.thumbnail_url,
+        text: s.text,
+        timestamp: s.creation_time ? s.creation_time * 1000 : Date.now(),
+        expiresAt: s.expiration_time
+          ? s.expiration_time * 1000
+          : Date.now() + 86400000,
+        seenBy: s.seen_by || [],
+        reactions: (s.reactions || []).map((r) => ({
+          userId: r.user_id || '',
+          reaction: r.reaction || '',
+        })),
+      }));
     } catch (error) {
       logger.error('Failed to get stories', error);
-      return [];
+      throw error;
     }
   }
 
+  /**
+   * Mark a story as viewed via POST /ajax/stories/seen/
+   */
   async viewStory(storyId: string): Promise<boolean> {
     this.requireLogin();
+
     try {
-      await this.authenticator
-        .getGraphQLClient()
-        .mutation('ViewStoryMutation', { story_id: storyId });
+      await this.authenticator.getGraphQLClient().formPost(
+        FACEBOOK_VIEW_STORY_URL,
+        { 'story_ids[0]': storyId }
+      );
       return true;
     } catch (error) {
       logger.error('Failed to view story', error);
@@ -808,8 +966,74 @@ export class PanindiganFCA extends EventEmitter {
     }
   }
 
+  // ==================== SECURITY ====================
+
+  /**
+   * Register a callback that fires whenever a Facebook checkpoint is detected.
+   * The guard will block all outgoing sends until `clearCheckpoint()` is called.
+   */
+  onCheckpoint(cb: CheckpointCallback): this {
+    this.checkpointGuard.onCheckpoint(cb);
+    return this;
+  }
+
+  /**
+   * Whether the account is currently in a checkpoint or suspended state.
+   */
+  isCheckpointed(): boolean {
+    return this.checkpointGuard.isBlocked();
+  }
+
+  /**
+   * Clear a checkpoint/suspended state after the user has manually resolved
+   * the security challenge.  Resets burst counters too.
+   */
+  clearCheckpoint(): void {
+    this.checkpointGuard.clearCheckpoint();
+  }
+
+  /**
+   * Current burst level for the rolling 60-second send window.
+   * 'safe' = < 20/min  |  'warn' = 20–39/min  |  'critical' = ≥ 40/min
+   */
+  getBurstLevel(): BurstLevel {
+    return this.checkpointGuard.burstLevel();
+  }
+
+  /**
+   * Current guard state: 'clear', 'checkpoint', or 'suspended'.
+   */
+  getGuardState(): GuardState {
+    return this.checkpointGuard.getState();
+  }
+
+  /**
+   * Full diagnostics snapshot from the security subsystem.
+   */
+  getSecurityStats(): GuardStats {
+    return this.checkpointGuard.getStats();
+  }
+
+  /**
+   * Number of messages sent in the current 60-second burst window.
+   */
+  getSendsLastMinute(): number {
+    return this.checkpointGuard.sendsLastMinute();
+  }
+
+  /**
+   * Entropy pool diagnostics (pool depth, draw count, total refills).
+   */
+  getEntropyStats(): ReturnType<EntropyPool['getStats']> {
+    return this.entropyPool.getStats();
+  }
+
   // ==================== CALLS ====================
 
+  /**
+   * Initiate a Messenger voice/video call via POST /messaging/call/
+   * Call signaling (ICE, SDP) happens over MQTT /t_rtc and /webrtc topics.
+   */
   async initiateCall(
     threadId: string,
     isVideo: boolean = false
@@ -818,21 +1042,24 @@ export class PanindiganFCA extends EventEmitter {
     logger.debug('Initiating call', { threadId, isVideo });
 
     try {
-      const result = await this.authenticator
-        .getGraphQLClient()
-        .mutation<{
-          initiate_call: {
-            call: {
-              id: string;
-              status: 'initiated' | 'connected' | 'ended' | 'failed';
-            };
-          };
-        }>('InitiateCallMutation', { thread_id: threadId, is_video: isVideo });
+      const result = await this.authenticator.getGraphQLClient().formPost<{
+        payload?: {
+          call_id?: string;
+          status?: string;
+        };
+      }>(FACEBOOK_INITIATE_CALL_URL, {
+        thread_fbid: threadId,
+        call_type: isVideo ? 'video' : 'audio',
+      });
 
       return {
-        callId:
-          result?.initiate_call?.call?.id || `call_${Date.now()}`,
-        status: result?.initiate_call?.call?.status || 'initiated',
+        callId: result?.payload?.call_id || `call_${Date.now()}`,
+        status:
+          (result?.payload?.status as
+            | 'initiated'
+            | 'connected'
+            | 'ended'
+            | 'failed') || 'initiated',
       };
     } catch (error) {
       logger.error('Failed to initiate call', error);
@@ -870,7 +1097,7 @@ export class PanindiganFCA extends EventEmitter {
 
   private requireLogin(): void {
     if (!this.isLoggedIn()) {
-      throw new Error('Not logged in. Call login() first.');
+      throw new SessionExpiredError();
     }
   }
 
@@ -886,8 +1113,14 @@ export class PanindiganFCA extends EventEmitter {
         payloadLength: payload.length,
       });
 
-      // Emit raw for debugging / custom handling
-      this.emit('raw', topic, payload);
+      // Emit typed raw event for debugging / custom handling
+      const rawEvent: RawEvent = {
+        type: 'raw',
+        timestamp: Date.now(),
+        topic,
+        payload,
+      };
+      this.emit('raw', rawEvent);
 
       // Let MQTTClient's parseEvent handle all decoding (JSON + binary)
       const event = this.mqttClient?.parseEvent(topic, payload);

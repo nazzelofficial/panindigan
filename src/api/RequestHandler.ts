@@ -1,14 +1,23 @@
 /**
  * HTTP Request Handler for Panindigan
- * Advanced retry mechanism with exponential backoff, circuit breaker, caching, and rate limiting
+ * Advanced retry mechanism with exponential backoff, circuit breaker, caching,
+ * rate limiting, and Facebook-specific headers (x-fb-lsd, x-asbd-id).
  */
 
 import type { CookieJar } from 'tough-cookie';
 import { logger } from '../utils/Logger.js';
-import { DEFAULT_HEADERS, ERROR_CODES, FACEBOOK_BASE_URL } from '../utils/Constants.js';
+import {
+  DEFAULT_HEADERS,
+  ERROR_CODES,
+  FACEBOOK_BASE_URL,
+  FB_HEADER_LSD,
+  FB_HEADER_ASBD,
+} from '../utils/Constants.js';
 import { CircuitBreaker } from '../utils/CircuitBreaker.js';
 import { RequestCache } from '../utils/RequestCache.js';
 import { RateLimiter } from '../utils/RateLimiter.js';
+import { NetworkError, RateLimitError, TimeoutError } from '../errors/index.js';
+import type { CheckpointGuard } from '../security/CheckpointGuard.js';
 import type { RequestOptions, APIError } from '../types/index.js';
 
 export class RequestHandler {
@@ -20,6 +29,13 @@ export class RequestHandler {
   private circuitBreaker: CircuitBreaker;
   private cache: RequestCache;
   private rateLimiter: RateLimiter;
+
+  /** x-fb-lsd token (extracted from page HTML, rotated periodically) */
+  private lsdToken: string = '';
+  /** x-asbd-id is a static fingerprint Messenger always sends */
+  private readonly asbdId: string = '198387';
+  /** Optional checkpoint guard — screens every response URL for redirect signals */
+  private checkpointGuard?: CheckpointGuard;
 
   constructor(cookieJar: CookieJar, userAgent: string, _proxy?: string) {
     this.cookieJar = cookieJar;
@@ -39,11 +55,24 @@ export class RequestHandler {
     });
   }
 
+  /** Inject the x-fb-lsd token extracted from a Facebook HTML page */
+  setLsdToken(token: string): void {
+    this.lsdToken = token;
+  }
+
+  getLsdToken(): string {
+    return this.lsdToken;
+  }
+
+  /** Attach a CheckpointGuard so every response URL is screened automatically. */
+  setCheckpointGuard(guard: CheckpointGuard): void {
+    this.checkpointGuard = guard;
+  }
+
   /**
    * Make an HTTP GET request
    */
   async get(url: string, options: RequestOptions = {}): Promise<Response> {
-    // Check cache for GET requests
     if (!options.skipCache) {
       const cacheKey = this.getCacheKey('GET', url, options);
       const cached = this.cache.get<string>(cacheKey);
@@ -52,7 +81,6 @@ export class RequestHandler {
         return new Response(cached, { status: 200, statusText: 'OK' });
       }
     }
-
     return this.request('GET', url, undefined, options);
   }
 
@@ -64,7 +92,7 @@ export class RequestHandler {
   }
 
   /**
-   * Make an HTTP request with retry logic
+   * Make an HTTP request with retry + exponential backoff
    */
   private async request(
     method: string,
@@ -73,7 +101,7 @@ export class RequestHandler {
     options: RequestOptions
   ): Promise<Response> {
     const maxRetries = this.maxRetries;
-    const retryDelay = this.retryDelay;
+    const baseDelay = this.retryDelay;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -81,20 +109,30 @@ export class RequestHandler {
         return await this.executeRequest(method, url, body, options);
       } catch (error) {
         lastError = error;
-        
+
+        // Do not retry non-retryable errors immediately
+        if (error instanceof RateLimitError && error.retryAfter) {
+          const waitMs = error.retryAfter * 1000;
+          logger.warn(`Rate limited — waiting ${waitMs}ms before retry`, { url });
+          await this.sleep(waitMs);
+          continue;
+        }
+
         const apiError = error as APIError;
         if (!apiError.retryable || attempt === maxRetries) {
           throw error;
         }
 
-        const delay = retryDelay * Math.pow(2, attempt);
-        logger.warn(`Request failed, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`, {
-          url,
-          method,
-          error: apiError.message,
-        });
+        // Exponential backoff with jitter
+        const delay = baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 0.3 * delay;
+        const wait = Math.round(delay + jitter);
 
-        await this.sleep(delay);
+        logger.warn(
+          `Request failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${wait}ms`,
+          { url, method, error: (error as Error).message }
+        );
+        await this.sleep(wait);
       }
     }
 
@@ -102,9 +140,51 @@ export class RequestHandler {
   }
 
   /**
-   * Execute a single request
+   * Execute a single HTTP request via native fetch, guarded by the circuit
+   * breaker and rate limiter.
    */
   private async executeRequest(
+    method: string,
+    url: string,
+    body: unknown,
+    options: RequestOptions
+  ): Promise<Response> {
+    // Rate-limit check (skip for requests that opted out)
+    if (!options.skipRateLimit && !this.rateLimiter.tryConsume()) {
+      const waitMs = this.rateLimiter.calculateWaitTime(1);
+      throw new RateLimitError(
+        `Local rate limit exceeded — try again in ${Math.ceil(waitMs / 1000)}s`,
+        Math.ceil(waitMs / 1000)
+      );
+    }
+
+    // Wrap the actual fetch inside the circuit breaker so repeated failures
+    // trip the breaker and give Facebook's servers time to recover.
+    // The CircuitBreaker throws a generic Error when OPEN — convert it to a
+    // typed NetworkError so callers get a retryable, instanceof-safe error.
+    try {
+      return await this.circuitBreaker.execute(async () => {
+        return this._doFetch(method, url, body, options);
+      }, `${method} ${url}`);
+    } catch (error: unknown) {
+      if (
+        error instanceof Error &&
+        error.message.includes('Circuit breaker is OPEN')
+      ) {
+        throw new NetworkError(
+          `Circuit breaker is open for ${url} — too many recent failures. Try again later.`,
+          0,
+          { circuitOpen: true, originalMessage: error.message }
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The raw fetch call — called exclusively from inside the circuit breaker.
+   */
+  private async _doFetch(
     method: string,
     url: string,
     body: unknown,
@@ -113,21 +193,28 @@ export class RequestHandler {
     const startTime = Date.now();
     const timeout = options.timeout || this.defaultTimeout;
 
-    // Get cookies for this URL
+    // Collect cookies
     const cookies = await this.cookieJar.getCookies(url);
     const cookieHeader = cookies.map((c) => `${c.key}=${c.value}`).join('; ');
 
-    // Build headers
+    // Build headers — always include FB-specific ones
     const headers: Record<string, string> = {
       ...DEFAULT_HEADERS,
       'User-Agent': this.userAgent,
-      'Cookie': cookieHeader,
+      Cookie: cookieHeader,
       ...options.headers,
     };
 
+    // Inject x-fb-lsd if we have the token
+    if (this.lsdToken) {
+      headers[FB_HEADER_LSD] = this.lsdToken;
+    }
+    // x-asbd-id is always present in Messenger Web requests
+    headers[FB_HEADER_ASBD] = this.asbdId;
+
     // Build request body
     let requestBody: string | Buffer | FormData | undefined;
-    if (body) {
+    if (body !== undefined && body !== null) {
       if (body instanceof FormData) {
         requestBody = body;
         delete headers['Content-Type'];
@@ -141,131 +228,98 @@ export class RequestHandler {
       }
     }
 
-    // Create abort controller for timeout
+    // Timeout via AbortController
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    // Make request
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: requestBody,
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: requestBody,
+        signal: controller.signal,
+        redirect: 'follow',
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      if ((fetchError as Error).name === 'AbortError') {
+        throw new TimeoutError(url, timeout);
+      }
+      const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+      const err = new NetworkError(`Fetch failed for ${url}: ${msg}`) as APIError;
+      err.retryable = true;
+      throw err;
+    }
 
     clearTimeout(timeoutId);
 
-    // Store cookies from response
+    // Sync Set-Cookie headers into cookie jar
     const setCookieHeader = response.headers.get('set-cookie');
     if (setCookieHeader) {
-      const cookieStrings = Array.isArray(setCookieHeader) 
-        ? setCookieHeader 
+      const cookieStrings = Array.isArray(setCookieHeader)
+        ? setCookieHeader
         : [setCookieHeader];
       for (const cookieStr of cookieStrings) {
-        await this.cookieJar.setCookie(cookieStr, url);
+        try {
+          await this.cookieJar.setCookie(cookieStr, url);
+        } catch {
+          // Ignore malformed Set-Cookie values
+        }
       }
     }
 
-    // Log API call
     const duration = Date.now() - startTime;
     logger.logAPICall(url, method, duration, response.ok);
 
-    // Check for HTTP errors
-    if (!response.ok) {
-      throw this.createError(
-        ERROR_CODES.API_ERROR,
-        `HTTP ${response.status}: ${response.statusText}`,
-        response.status
+    // Screen for checkpoint redirects (URL-level signal, no body needed)
+    if (this.checkpointGuard) {
+      this.checkpointGuard.inspectUrl(response.url || url, response.status);
+    }
+
+    // Handle rate limiting explicitly
+    if (response.status === 429) {
+      const retryAfterHeader = response.headers.get('retry-after');
+      const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 60;
+      throw new RateLimitError(
+        `Rate limited by Facebook: retry after ${retryAfter}s`,
+        retryAfter
       );
+    }
+
+    if (!response.ok) {
+      const err = new NetworkError(
+        `HTTP ${response.status}: ${response.statusText} (${url})`,
+        response.status
+      ) as APIError;
+      err.code = ERROR_CODES.API_ERROR;
+      err.retryable = response.status >= 500;
+      throw err;
     }
 
     return response;
   }
 
-  /**
-   * Get the cookie jar
-   */
-  getCookieJar(): CookieJar {
-    return this.cookieJar;
-  }
+  getCookieJar(): CookieJar { return this.cookieJar; }
 
-  /**
-   * Set the cookie jar
-   */
-  setCookieJar(cookieJar: CookieJar): void {
-    this.cookieJar = cookieJar;
-  }
+  setCookieJar(cookieJar: CookieJar): void { this.cookieJar = cookieJar; }
 
-  /**
-   * Get cookies as a string
-   */
   async getCookiesString(url: string = FACEBOOK_BASE_URL): Promise<string> {
     const cookies = await this.cookieJar.getCookies(url);
     return cookies.map((c) => `${c.key}=${c.value}`).join('; ');
   }
 
-  /**
-   * Create an API error
-   */
-  private createError(
-    code: string,
-    message: string,
-    statusCode: number = 0,
-    originalError?: unknown
-  ): APIError {
-    const error = new Error(message) as APIError;
-    error.code = code;
-    error.statusCode = statusCode;
-    error.retryable = this.isRetryableError(code, statusCode);
-    error.data = originalError;
-    return error;
-  }
+  getCache(): RequestCache { return this.cache; }
 
-  /**
-   * Check if an error is retryable
-   */
-  private isRetryableError(code: string, statusCode: number): boolean {
-    if (code === ERROR_CODES.NETWORK_ERROR || code === ERROR_CODES.TIMEOUT_ERROR) {
-      return true;
-    }
-    if (code === ERROR_CODES.API_ERROR && statusCode >= 500 && statusCode < 600) {
-      return true;
-    }
-    return false;
-  }
+  getCircuitBreaker(): CircuitBreaker { return this.circuitBreaker; }
 
-  /**
-   * Sleep helper
-   */
+  getRateLimiter(): RateLimiter { return this.rateLimiter; }
+
   private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /**
-   * Generate cache key
-   */
   private getCacheKey(method: string, url: string, options: RequestOptions): string {
     return `${method}:${url}:${JSON.stringify(options)}`;
-  }
-
-  /**
-   * Get cache instance
-   */
-  getCache(): RequestCache {
-    return this.cache;
-  }
-
-  /**
-   * Get circuit breaker instance
-   */
-  getCircuitBreaker(): CircuitBreaker {
-    return this.circuitBreaker;
-  }
-
-  /**
-   * Get rate limiter instance
-   */
-  getRateLimiter(): RateLimiter {
-    return this.rateLimiter;
   }
 }

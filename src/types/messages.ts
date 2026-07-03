@@ -15,7 +15,7 @@ export interface Mention {
 }
 
 export interface MessageAttachment {
-  type: 'photo' | 'video' | 'audio' | 'file' | 'sticker' | 'gif' | 'share' | 'location' | 'animated_image';
+  type: 'photo' | 'video' | 'audio' | 'voice' | 'file' | 'sticker' | 'gif' | 'share' | 'location' | 'contact' | 'animated_image';
   id: string;
   url?: string;
   previewUrl?: string;
@@ -44,6 +44,11 @@ export interface VideoAttachment extends MessageAttachment {
 export interface AudioAttachment extends MessageAttachment {
   type: 'audio';
   isVoiceMail: boolean;
+}
+
+export interface VoiceAttachment extends MessageAttachment {
+  type: 'voice';
+  waveform?: number[];
 }
 
 export interface FileAttachment extends MessageAttachment {
@@ -77,6 +82,14 @@ export interface LocationAttachment extends MessageAttachment {
   city?: string;
 }
 
+export interface ContactAttachment extends MessageAttachment {
+  type: 'contact';
+  contactId: string;
+  contactName: string;
+  phone?: string;
+  email?: string;
+}
+
 export type ReactionType = 'like' | 'love' | 'haha' | 'wow' | 'sad' | 'angry' | 'care';
 
 export interface Reaction {
@@ -100,6 +113,8 @@ export interface Message {
   isUnread: boolean;
   isForwarded?: boolean;
   isSponsored?: boolean;
+  sticker?: string;
+  replyToMessage?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -116,11 +131,31 @@ export interface SendMessageOptions {
   body?: string;
   mentions?: Mention[];
   replyToMessage?: string;
+  /** Pre-uploaded attachment IDs or raw buffers */
   attachments?: Array<Buffer | string | UploadableFile>;
+  /** Sticker ID to send */
   sticker?: string;
+  /** Emoji to send as a large emoji */
   emoji?: string;
   emojiSize?: 'small' | 'medium' | 'large';
+  /** GIF URL (from Tenor/GIPHY) */
+  gifUrl?: string;
+  /** Voice message buffer */
+  voice?: Buffer;
+  /** Location to share */
+  location?: { latitude: number; longitude: number; name?: string; address?: string };
+  /** Contact card to share */
+  contact?: { userId: string; name: string; phone?: string; email?: string };
+  /** Silent push (no notification sound) */
   isSilent?: boolean;
+  /** Messenger sync group (1 = default) */
+  syncGroup?: number;
+  /** Ephemeral message TTL in seconds (0 = normal) */
+  ephemeralTtl?: number;
+  /** Source identifier sent to Facebook */
+  initiatingSource?: string;
+  /** Client-side tags array */
+  clientTags?: string[];
 }
 
 export interface UploadableFile {

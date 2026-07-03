@@ -4,8 +4,9 @@
  */
 
 import { logger } from '../utils/Logger.js';
-import { FACEBOOK_UPLOAD_URL } from '../utils/Constants.js';
+import { FACEBOOK_UPLOAD_URL, FILE_SIZE_LIMITS, ALLOWED_MIME_TYPES } from '../utils/Constants.js';
 import { getMimeTypeFromExtension, parseFacebookResponse } from '../utils/Helpers.js';
+import { UploadError } from '../errors/index.js';
 import type { GraphQLClient } from '../api/GraphQLClient.js';
 import type {
   UploadResult,
@@ -53,7 +54,7 @@ export class MediaUploader {
   async uploadImage(buffer: Buffer, options?: ImageUploadOptions): Promise<UploadResult> {
     const filename = options?.filename || 'image.jpg';
     const mimeType = options?.mimeType || getMimeTypeFromExtension(filename) || 'image/jpeg';
-
+    this.validateUpload(buffer, mimeType, 'image');
     logger.debug('Uploading image', { filename, size: buffer.length });
     return this.upload(buffer, filename, mimeType);
   }
@@ -64,7 +65,7 @@ export class MediaUploader {
   async uploadVideo(buffer: Buffer, options?: VideoUploadOptions): Promise<UploadResult> {
     const filename = options?.filename || 'video.mp4';
     const mimeType = options?.mimeType || getMimeTypeFromExtension(filename) || 'video/mp4';
-
+    this.validateUpload(buffer, mimeType, 'video');
     logger.debug('Uploading video', { filename, size: buffer.length });
     return this.upload(buffer, filename, mimeType);
   }
@@ -75,7 +76,7 @@ export class MediaUploader {
   async uploadAudio(buffer: Buffer, options?: AudioUploadOptions): Promise<UploadResult> {
     const filename = options?.filename || 'audio.mp3';
     const mimeType = options?.mimeType || getMimeTypeFromExtension(filename) || 'audio/mpeg';
-
+    this.validateUpload(buffer, mimeType, 'audio');
     logger.debug('Uploading audio', { filename, size: buffer.length });
     return this.upload(buffer, filename, mimeType);
   }
@@ -90,9 +91,36 @@ export class MediaUploader {
     const filename = options?.filename || 'document.pdf';
     const mimeType =
       options?.mimeType || getMimeTypeFromExtension(filename) || 'application/pdf';
-
+    this.validateUpload(buffer, mimeType, 'document');
     logger.debug('Uploading document', { filename, size: buffer.length });
     return this.upload(buffer, filename, mimeType);
+  }
+
+  /**
+   * Validate buffer size and MIME type against Facebook's limits before uploading.
+   */
+  private validateUpload(
+    buffer: Buffer,
+    mimeType: string,
+    category: 'image' | 'video' | 'audio' | 'document'
+  ): void {
+    const sizeLimit = FILE_SIZE_LIMITS[category];
+    if (buffer.length > sizeLimit) {
+      throw new UploadError(
+        `File size ${buffer.length} bytes exceeds the ${category} limit of ${sizeLimit} bytes`,
+        { category, size: buffer.length, limit: sizeLimit }
+      );
+    }
+
+    const allowedTypes = ALLOWED_MIME_TYPES[category];
+    const normalizedMime = mimeType.toLowerCase().split(';')[0].trim();
+    if (!allowedTypes.includes(normalizedMime)) {
+      throw new UploadError(
+        `MIME type "${normalizedMime}" is not allowed for ${category} uploads. ` +
+          `Allowed: ${allowedTypes.join(', ')}`,
+        { category, mimeType: normalizedMime, allowed: allowedTypes }
+      );
+    }
   }
 
   /**

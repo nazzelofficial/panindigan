@@ -6,7 +6,7 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/Logger.js';
-import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS } from '../utils/Constants.js';
+import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS, MQTT_TOPICS } from '../utils/Constants.js';
 import { generateClientId } from '../utils/Helpers.js';
 import { EventParser } from '../events/EventParser.js';
 import type { Session, PanindiganEvent } from '../types/index.js';
@@ -476,22 +476,27 @@ export class MQTTClient extends EventEmitter {
    * Subscribe to required topics
    */
   private subscribeToTopics(): void {
-    // Subscribe to core message topics
+    // All topics Messenger Web subscribes to at connection time
     const topics = [
-      '/t_ms',           // Message sync (core for all messages, 1-1 and groups)
-      '/t_rtc',          // Real-time call
-      '/t_p',            // Presence
-      '/t_tn',           // Typing notification
-      '/t_graphql',      // GraphQL events (thread updates, etc)
-      '/t_messaging_events',  // Messaging events (read receipts, etc)
-      `mqtt_c2b_${this.session.userId}`,  // Client-to-Business (personal messages)
-      
-      // Additional topics for better group chat support
-      '/t_sb',           // Subscription (group updates)
-      '/t_admin_text',   // Admin text messages
-      '/t_presence',     // Extended presence
-      '/t_msg_body',     // Message body (raw)
-      '/t_delta',        // Delta updates (general)
+      MQTT_TOPICS.MESSAGE_SYNC,          // /t_ms — all messages + deltas
+      MQTT_TOPICS.RTC,                   // /t_rtc — voice/video calls
+      MQTT_TOPICS.PRESENCE,              // /t_p — presence updates
+      MQTT_TOPICS.TYPING,                // /t_tn — typing notifications
+      MQTT_TOPICS.GRAPHQL,               // /t_graphql — thread mutations
+      MQTT_TOPICS.MESSAGING_EVENTS,      // /t_messaging_events — read/delivery
+      MQTT_TOPICS.NOTIFY,                // /t_notify — push alerts
+      MQTT_TOPICS.REGION_HINT,           // /t_region_hint — broker routing
+      MQTT_TOPICS.ORCA_PRESENCE,         // /orca_presence — extended presence
+      MQTT_TOPICS.ORCA_TYPING,           // /orca_typing_notifications
+      MQTT_TOPICS.ORCA_MESSAGES,         // /orca_message_notifications
+      MQTT_TOPICS.WEBRTC,                // /webrtc — WebRTC signaling
+      MQTT_TOPICS.WEBRTC_RESPONSE,       // /webrtc_response
+      `mqtt_c2b_${this.session.userId}`, // personal C2B channel
+      MQTT_TOPICS.SUBSCRIPTION,          // /t_sb — subscription updates
+      MQTT_TOPICS.ADMIN_TEXT,            // /t_admin_text — system messages
+      MQTT_TOPICS.PRESENCE_EXTENDED,     // /t_presence
+      MQTT_TOPICS.MESSAGE_BODY,          // /t_msg_body
+      MQTT_TOPICS.DELTA,                 // /t_delta
     ];
     
     for (const topic of topics) {
@@ -572,9 +577,11 @@ export class MQTTClient extends EventEmitter {
  
   /**
    * Get next packet ID
+   * MQTT 3.1.1 §2.3.1: packet identifiers MUST be non-zero.
+   * Valid range is 1–65535; wrap from 65535 back to 1.
    */
   private getNextPacketId(): number {
-    this.lastPacketId = (this.lastPacketId + 1) % 65536;
+    this.lastPacketId = (this.lastPacketId % 65535) + 1;
     return this.lastPacketId;
   }
  
@@ -596,20 +603,27 @@ export class MQTTClient extends EventEmitter {
       });
     }
  
-    // Subscribe topics for URL params
+    // Subscribe topics for URL params (broker uses these for initial filtering)
     const topics = [
-      '/t_ms',
-      '/t_rtc',
-      '/t_p',
-      '/t_tn',
-      '/t_graphql',
-      '/t_messaging_events',
+      MQTT_TOPICS.MESSAGE_SYNC,
+      MQTT_TOPICS.RTC,
+      MQTT_TOPICS.PRESENCE,
+      MQTT_TOPICS.TYPING,
+      MQTT_TOPICS.GRAPHQL,
+      MQTT_TOPICS.MESSAGING_EVENTS,
+      MQTT_TOPICS.NOTIFY,
+      MQTT_TOPICS.REGION_HINT,
+      MQTT_TOPICS.ORCA_PRESENCE,
+      MQTT_TOPICS.ORCA_TYPING,
+      MQTT_TOPICS.ORCA_MESSAGES,
+      MQTT_TOPICS.WEBRTC,
+      MQTT_TOPICS.WEBRTC_RESPONSE,
       `mqtt_c2b_${this.session.userId}`,
-      '/t_sb',
-      '/t_admin_text',
-      '/t_presence',
-      '/t_msg_body',
-      '/t_delta',
+      MQTT_TOPICS.SUBSCRIPTION,
+      MQTT_TOPICS.ADMIN_TEXT,
+      MQTT_TOPICS.PRESENCE_EXTENDED,
+      MQTT_TOPICS.MESSAGE_BODY,
+      MQTT_TOPICS.DELTA,
     ];
     
     // Build URL manually to avoid URLSearchParams truncation issues
@@ -710,8 +724,8 @@ export class MQTTClient extends EventEmitter {
       offset += 2;
     }
     
-    // Read payload
-    const payload = data.slice(offset);
+    // Read payload — use subarray (non-copying) instead of the deprecated slice()
+    const payload = data.subarray(offset);
     
     return { type: 'PUBLISH', topic, payload, qos, packetId };
   }
@@ -848,20 +862,17 @@ export class MQTTClient extends EventEmitter {
   }
  
   /**
-   * Parse and emit specific events from MQTT messages
+   * Parse and emit specific events from MQTT messages.
+   * Uses parseAll() so that bulk presence maps fan out into individual events.
    */
   private parseAndEmitEvent(topic: string, payload: Buffer): void {
     // Emit raw data first
     this.emit('raw', topic, payload);
-    
-    // Use EventParser to parse the event
-    const event = this.eventParser.parse(topic, payload);
-    
-    if (event) {
-      // Emit typed event
+
+    // parseAll returns N events (most topics: 0–1; presence: one per UID)
+    const events = this.eventParser.parseAll(topic, payload);
+    for (const event of events) {
       this.emit(event.type, event);
-      
-      // Also emit on 'event' channel for catch-all listeners
       this.emit('event', event);
     }
   }

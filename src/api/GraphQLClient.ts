@@ -9,7 +9,9 @@ import {
   ERROR_CODES,
 } from '../utils/Constants.js';
 import { generateReqParam, generateRandomString } from '../utils/Helpers.js';
+import { GraphQLError } from '../errors/index.js';
 import type { RequestHandler } from './RequestHandler.js';
+import type { CheckpointGuard } from '../security/CheckpointGuard.js';
 import type {
   GraphQLResponse,
   BatchRequest,
@@ -21,7 +23,7 @@ export class GraphQLClient {
   private requestHandler: RequestHandler;
   private fbDtsg: string = '';
   private userId: string = '';
-  private reqCounter: number = 0;
+  private checkpointGuard?: CheckpointGuard;
 
   constructor(requestHandler: RequestHandler) {
     this.requestHandler = requestHandler;
@@ -40,6 +42,15 @@ export class GraphQLClient {
    */
   getRequestHandler(): RequestHandler {
     return this.requestHandler;
+  }
+
+  /**
+   * Attach a CheckpointGuard so response bodies are screened for checkpoint signals.
+   * Also wires the guard into the underlying RequestHandler for URL-level screening.
+   */
+  setCheckpointGuard(guard: CheckpointGuard): void {
+    this.checkpointGuard = guard;
+    this.requestHandler.setCheckpointGuard(guard);
   }
 
   /**
@@ -76,6 +87,10 @@ export class GraphQLClient {
     );
 
     const text = await response.text();
+
+    // Screen body for checkpoint signals before parsing
+    this.checkpointGuard?.inspectBody(text, url);
+
     const jsonStr = text.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
 
     let data: Record<string, unknown>;
@@ -133,9 +148,8 @@ export class GraphQLClient {
       ...formData,
     };
 
-    // Add the query
-    const queryKey = `q${this.reqCounter++}`;
-    payload[queryKey] = JSON.stringify({
+    // Add the query (key is always q0 for a single-query call)
+    payload['q0'] = JSON.stringify({
       name: queryName,
       variables: JSON.stringify(variables),
       ...(queryDoc && { doc_id: queryDoc }),
@@ -380,22 +394,14 @@ export class GraphQLClient {
   }
 
   /**
-   * Create a GraphQL error
+   * Create a typed GraphQL error, preserving the caller-supplied error code.
    */
   private createGraphQLError(
     code: string,
     message: string,
     statusCode: number = 0,
     data?: unknown
-  ): Error {
-    const error = new Error(message) as Error & {
-      code: string;
-      statusCode: number;
-      data?: unknown;
-    };
-    error.code = code;
-    error.statusCode = statusCode;
-    error.data = data;
-    return error;
+  ): GraphQLError {
+    return new GraphQLError(message, statusCode, data, code);
   }
 }

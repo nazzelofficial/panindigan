@@ -8,11 +8,14 @@ import { logger } from '../utils/Logger.js';
 import type {
   PanindiganEvent,
   MessageEvent,
+  MessageEditEvent,
+  MessageUnsendEvent,
   MessageReactionEvent,
   TypingEvent,
   ReadReceiptEvent,
   DeliveryReceiptEvent,
   PresenceEvent,
+  RegionHintEvent,
   ThreadRenameEvent,
   ThreadColorEvent,
   ThreadEmojiEvent,
@@ -28,6 +31,29 @@ import type {
 } from '../types/index.js';
 
 export class EventParser {
+  /**
+   * Parse an MQTT message and return ALL events it represents.
+   *
+   * Most topics produce 0–1 events. Presence topics (/t_p, /orca_presence)
+   * may encode a bulk UID map → this returns one PresenceEvent per UID so no
+   * updates are silently dropped. Both MQTTClient and FastMQTT use this method.
+   */
+  parseAll(topic: string, payload: Buffer): PanindiganEvent[] {
+    const data = this.decodePayload(payload);
+    if (data === null) return [];
+
+    // Presence topics may carry N UIDs in a single payload
+    if (topic === '/t_p' || topic === '/orca_presence') {
+      return this.parseAllPresence(data);
+    }
+
+    // All other topics produce at most one event; reuse existing routing.
+    // (decodePayload is called again inside parse() — acceptable for non-presence
+    //  topics which are always small JSON objects.)
+    const event = this.parse(topic, payload);
+    return event ? [event] : [];
+  }
+
   /**
    * Parse an MQTT message based on topic.
    * Facebook may send JSON directly or zlib-compressed binary payloads — both are handled.
@@ -51,6 +77,17 @@ export class EventParser {
         return this.parseMessagingEvent(data);
       case '/t_notify':
         return this.parseNotifyEvent(data);
+      case '/orca_presence':
+        return this.parsePresence(data);
+      case '/orca_typing_notifications':
+        return this.parseTypingNotification(data);
+      case '/orca_message_notifications':
+        return this.parseMessageSync(data);
+      case '/t_region_hint':
+        return this.parseRegionHint(data);
+      case '/webrtc':
+      case '/webrtc_response':
+        return this.parseWebRTCEvent(data);
       default:
         if (topic.startsWith('mqtt_c2b_')) {
           return this.parseC2BEvent(data);
@@ -159,6 +196,11 @@ export class EventParser {
       return this.parseDeliveryReceiptDelta(d);
     }
 
+    // Message edit
+    if (cls === 'editmessage' || d.editedMessage) {
+      return this.parseMessageEditDelta(d);
+    }
+
     // Typing (sometimes arrives in /t_ms as well)
     if (cls === 'typing' || d.type === 'typ') {
       return this.parseTypingDelta(d);
@@ -257,7 +299,7 @@ export class EventParser {
   /**
    * Parse an UnsendMessage delta.
    */
-  private parseUnsendDelta(d: Record<string, unknown>): PanindiganEvent | null {
+  private parseUnsendDelta(d: Record<string, unknown>): MessageUnsendEvent | null {
     const threadKey = d.threadKey as Record<string, string> | undefined;
     const threadId = this.extractThreadId(threadKey);
     if (!threadId) return null;
@@ -268,7 +310,28 @@ export class EventParser {
       threadId,
       messageId: (d.messageId as string) || '',
       userId: (d.actorFbId as string) || '',
-    } as unknown as PanindiganEvent;
+    };
+  }
+
+  /**
+   * Parse a message-edit delta.
+   */
+  private parseMessageEditDelta(d: Record<string, unknown>): MessageEditEvent | null {
+    const threadKey = d.threadKey as Record<string, string> | undefined;
+    const threadId = this.extractThreadId(threadKey);
+    if (!threadId) return null;
+
+    const edited = (d.editedMessage as Record<string, unknown>) || d;
+
+    return {
+      type: 'message_edit',
+      timestamp: Date.now(),
+      threadId,
+      messageId: (d.messageId as string) || '',
+      userId: (d.actorFbId as string) || '',
+      body: (edited.body as string) || '',
+      editedAt: Number(d.editTimestamp) || Date.now(),
+    };
   }
 
   /**
@@ -420,40 +483,62 @@ export class EventParser {
 
   /**
    * Parse presence updates from /t_p.
-   * FB sends presence as either a plain object or a list.
+   * FB sends presence as either a plain object or a bulk map of UIDs.
+   *
+   * Returns the first PresenceEvent directly; any additional entries from a
+   * bulk map are available via parseAllPresence() for callers that want them.
    */
   private parsePresence(data: Record<string, unknown>): PresenceEvent | null {
-    // Single presence update
+    const events = this.parseAllPresence(data);
+    if (events.length === 0) return null;
+    // Log if we are dropping any bulk entries (caller only gets the first)
+    if (events.length > 1) {
+      logger.debug('parsePresence: bulk map with multiple UIDs; returning first event', {
+        count: events.length,
+      });
+    }
+    return events[0];
+  }
+
+  /**
+   * Parse all presence events from a payload that may contain a bulk presence
+   * map (`{ "<uid>": { "p": 2, "lat": ... }, ... }`).
+   * Returns one PresenceEvent per UID found.
+   */
+  parseAllPresence(data: Record<string, unknown>): PresenceEvent[] {
+    const now = Date.now();
+
+    // Single presence update with explicit userId / uid field
     if (data.userId || data.uid) {
-      return {
+      return [{
         type: 'presence',
-        timestamp: Date.now(),
+        timestamp: now,
         userId: (data.userId as string) || (data.uid as string),
         status: this.mapPresenceStatus(data.status as string),
         lastActive: data.lastActive as number,
-      };
+      }];
     }
 
     // Bulk presence map  { "<uid>": { "p": 2, "lat": 1234567890 }, ... }
     const keys = Object.keys(data).filter((k) => /^\d+$/.test(k));
     if (keys.length > 0) {
-      const uid = keys[0];
-      const entry = data[uid] as Record<string, unknown>;
-      const p = Number(entry.p);
-      let status: 'active' | 'idle' | 'offline' = 'offline';
-      if (p === 2) status = 'active';
-      else if (p === 0) status = 'idle';
-
-      return {
-        type: 'presence',
-        timestamp: Date.now(),
-        userId: uid,
-        status,
-        lastActive: entry.lat as number,
-      };
+      return keys.map((uid) => {
+        const entry = data[uid] as Record<string, unknown>;
+        const p = Number(entry.p);
+        let status: 'active' | 'idle' | 'offline' = 'offline';
+        if (p === 2) status = 'active';
+        else if (p === 0) status = 'idle';
+        return {
+          type: 'presence' as const,
+          timestamp: now,
+          userId: uid,
+          status,
+          lastActive: entry.lat as number,
+        };
+      });
     }
 
-    return null;
+    return [];
   }
 
   /**
@@ -674,6 +759,32 @@ export class EventParser {
    */
   private parseC2BEvent(data: Record<string, unknown>): PanindiganEvent | null {
     return this.parseMessageSync(data);
+  }
+
+  /**
+   * Parse /t_region_hint — broker region routing hint.
+   * Facebook sends this immediately after CONNACK to indicate which region
+   * the client should prefer for reconnects.
+   */
+  private parseRegionHint(data: Record<string, unknown>): RegionHintEvent | null {
+    const region = (data.region as string) || (data.hint as string) || '';
+    if (!region) return null;
+
+    logger.debug('Region hint received', { region });
+    return {
+      type: 'region_hint',
+      timestamp: Date.now(),
+      region,
+    };
+  }
+
+  /**
+   * Parse /webrtc and /webrtc_response signaling messages.
+   * Delegate to the RTC event parser where possible.
+   */
+  private parseWebRTCEvent(data: Record<string, unknown>): PanindiganEvent | null {
+    // Route through standard RTC parser — both topics share the same schema
+    return this.parseRTCEvent(data);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

@@ -5,6 +5,237 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-07-03
+
+### Fixed
+
+#### Security (`src/security/CheckpointGuard.ts`)
+- **False-positive checkpoint on any 302** — `inspectUrl()` was using `statusCode === 302 || url.includes(signal)` meaning *any* redirect (including a successful post-login redirect) triggered a checkpoint error; corrected to `hasCheckpointSignal` only, so a 302 without a known checkpoint path is not treated as a checkpoint
+
+#### Errors (`src/errors/index.ts`)
+- **Missing `UnsupportedOperationError`** — added typed `UnsupportedOperationError extends PanindiganError` (code `NOT_IMPLEMENTED`, non-retryable) and exported it from `src/index.ts`
+
+#### API (`src/api/RequestHandler.ts`)
+- **Dead `CircuitBreaker` and `RateLimiter`** — `executeRequest()` was completely bypassing both subsystems; now calls `rateLimiter.tryConsume()` before the fetch and wraps the fetch inside `circuitBreaker.execute()` so failures trip the breaker and rate exhaustion throws a typed `RateLimitError`
+
+#### Core (`src/core/PanindiganFCA.ts`)
+- **`requireLogin()` throws generic `Error`** — changed to throw `SessionExpiredError` for proper typed error handling
+- **Fake GraphQL `createPoll`** — replaced fabricated `CreatePollMutation` with a real form-encoded `POST /messaging/create_poll/` call
+- **Fake GraphQL `votePoll`** — replaced fabricated `VotePollMutation` with a real form-encoded `POST /messaging/update_vote/` call
+- **Fake GraphQL `getPollResults`** — replaced fabricated `PollQuery` with a real form-encoded `POST /ajax/messaging/poll_info.php` call
+- **Fake GraphQL `createEvent`** — replaced fabricated `CreateEventMutation` with a real form-encoded `POST /messaging/create_event/` call
+- **Fake GraphQL `rsvpToEvent`** — replaced fabricated `RSVPEventMutation` with a real form-encoded `POST /messaging/update_event_rsvp/` call
+- **Fake GraphQL `getStories`** — replaced fabricated `StoriesQuery` with a real form-encoded `POST /ajax/stories/` call
+- **Fake GraphQL `viewStory`** — replaced fabricated `ViewStoryMutation` with a real form-encoded `POST /ajax/stories/seen/` call
+- **Fake GraphQL `initiateCall`** — replaced fabricated `InitiateCallMutation` with a real form-encoded `POST /messaging/call/` call; WebRTC signaling (ICE/SDP) still flows over MQTT `/t_rtc`
+
+#### User Manager (`src/users/UserManager.ts`)
+- **Fake GraphQL `getFriends`** — replaced fabricated `FriendsQuery` with a real form-encoded `POST /ajax/mercury/friends_info.php` call with pagination support
+- **Fake GraphQL `getSentFriendRequests`** — replaced fabricated `OutgoingFriendRequestsQuery` with a real form-encoded `POST /ajax/social-privacy/friend-request-page.php` call
+- **Fake GraphQL `blockUser` / `unblockUser`** — replaced fabricated `BlockUserMutation` / `UnblockUserMutation` with real form-encoded `POST /ajax/profile/userblockunblock.php` calls using `block_action=block|unblock`
+- **Fake GraphQL `getBlockedList`** — replaced fabricated `BlockedUsersQuery` with a real form-encoded `POST /settings/blocking/ajax/` call
+- **Fake GraphQL `getBirthdays`** — replaced fabricated `BirthdaysQuery` with a real form-encoded `POST /ajax/birthday/notification/` call
+- **Fake GraphQL `getPresence`** — replaced fabricated `PresenceQuery` with a real form-encoded `POST /ajax/mercury/chat_online_presences.php` call; real-time bulk presence still arrives via MQTT `/t_p`
+
+#### Messaging (`src/messaging/MessageSender.ts`)
+- **All attachments sent as `image_ids`** — pre-uploaded string IDs were unconditionally sent as `image_ids[N]` regardless of type; now routes to `video_ids`, `audio_ids`, or `file_ids` when an `UploadableFile` with a `mimeType` is passed, matching what Facebook Messenger Web sends
+
+#### MQTT (`src/mqtt/MQTTClient.ts`, `src/mqtt/FastMQTT.ts`)
+- **Packet ID 0 (MQTT 3.1.1 violation)** — `getNextPacketId()` used `% 65536` which can return 0 (forbidden by spec §2.3.1); corrected to `% 65535 + 1` (wraps 1–65535) in both clients
+- **Deprecated `Buffer.slice()`** — `parsePublishPacket` used `data.slice(offset)` (deprecated in Node 17+); changed to `data.subarray(offset)` in both clients
+
+#### Events (`src/events/EventParser.ts`)
+- **`parsePresence()` discards bulk map** — when FB sends a bulk presence map `{ "<uid>": { p, lat }, … }`, only the first UID was processed; added `parseAllPresence()` that returns `PresenceEvent[]` for every UID in the map; `parsePresence()` now delegates to `parseAllPresence()` and returns the first result
+
+#### Thread Manager (`src/threads/ThreadManager.ts`)
+- **`parseThread()` always returns empty `participants` and `adminIds`** — now maps `t.all_participants.nodes` and `t.admin_ids` from the response when present, with full `Participant` objects including `nickname`, `isAdmin`, `isUser` fields
+- **`createGroup()` missing thread name** — `thread_name` param was not included in the POST body; now included when `options.name` is provided
+
+#### Media (`src/media/MediaUploader.ts`)
+- **No MIME/size validation before upload** — all upload methods (`uploadImage`, `uploadVideo`, `uploadAudio`, `uploadDocument`) now call a `validateUpload()` guard that checks against `FILE_SIZE_LIMITS` and `ALLOWED_MIME_TYPES` from Constants before sending the multipart request; throws a typed `UploadError` on violation
+
+#### Utilities (`src/utils/RequestCache.ts`, `src/utils/MessageQueue.ts`)
+- **`RequestCache` no auto-clean timer** — `cleanExpired()` existed but was only called on get/insert; constructor now starts a `setInterval` every 5 minutes with `unref()` so the process can exit cleanly; `destroy()` method added to cancel the timer
+- **`MessageQueue` blocking sync I/O** — `saveToDisk()` used `writeFileSync` on every enqueue/dequeue/remove, blocking the event loop; replaced with async `writeFile` fire-and-forget from `fs/promises`
+
+#### Constants (`src/utils/Constants.ts`)
+- Added missing endpoint constants: `FACEBOOK_FRIENDS_INFO_URL`, `FACEBOOK_SENT_REQUESTS_URL`, `FACEBOOK_BLOCK_URL`, `FACEBOOK_BLOCKED_LIST_URL`, `FACEBOOK_BIRTHDAYS_URL`, `FACEBOOK_PRESENCE_URL`, `FACEBOOK_STORIES_URL`, `FACEBOOK_VIEW_STORY_URL`, `FACEBOOK_CREATE_EVENT_URL`, `FACEBOOK_RSVP_EVENT_URL`, `FACEBOOK_INITIATE_CALL_URL`, `FACEBOOK_POLL_RESULTS_URL`
+
+#### MQTT (`src/mqtt/MQTTClient.ts`, `src/mqtt/FastMQTT.ts`, `src/events/EventParser.ts`)
+- **Presence fan-out still dropped in MQTT layer** — `parseAndEmitEvent()` / `handlePublish()` called `eventParser.parse()` which returns only the first PresenceEvent even after `parseAllPresence()` was added; added `EventParser.parseAll()` which returns `PanindiganEvent[]` (bulk presence → one event per UID, all other topics → 0–1 events), and updated both MQTT clients to iterate the result so every UID in a bulk map is emitted
+
+#### API (`src/api/RequestHandler.ts`)
+- **Circuit-breaker OPEN throws untyped `Error`** — when the breaker is open, `CircuitBreaker.execute()` throws a plain `Error`; `executeRequest()` now catches that and re-throws as a typed `NetworkError` (retryable, `circuitOpen: true` in `data`) so callers get a predictable instanceof-safe error
+
+#### Public API (`src/core/PanindiganFCA.ts`)
+- **`getPresence` missing from main API surface** — `UserManager.getPresence()` was implemented but not delegated through `PanindiganFCA`; added `getPresence(userId): Promise<Presence>` wrapper (spec §13: every manager method must be exposed)
+
+#### Exports (`src/index.ts`)
+- Added `UnsupportedOperationError` to the public error class exports
+
+## [1.2.3] - 2026-07-02
+
+### Fixed
+
+#### FastMQTT (`src/mqtt/FastMQTT.ts`)
+- **Topic drift** — `subscribeToTopics()` was using a hardcoded list of 12 topic strings that diverged from `MQTTClient`'s canonical set; now uses `MQTT_TOPICS` constants throughout, matching all 19 topics including `/t_notify`, `/t_region_hint`, `/orca_presence`, `/orca_typing_notifications`, `/orca_message_notifications`, `/webrtc`, and `/webrtc_response`
+- **Topic drift in `buildBrokerUrl()`** — same hardcoded list was also used for the `subscribe_topics` broker URL parameter; updated to the full `MQTT_TOPICS` set in sync with `subscribeToTopics()`
+- **Fabricated `irisSeqId`** — `buildBrokerUrl()` fell back to `Math.floor(Date.now() / 1000).toString()` when no valid `irisSeqId` was present, producing a meaningless timestamp in place of a real Iris sequence number; now omits `sid`/`seq` query parameters entirely when `irisSeqId` is absent or `'0'`, matching `MQTTClient` behaviour, and logs a warning instead
+- **Missing `MQTT_TOPICS` import** — added `MQTT_TOPICS` to the import from `../utils/Constants.js`
+
+#### GraphQLClient (`src/api/GraphQLClient.ts`)
+- **Untyped error creation** — `createGraphQLError()` was constructing a plain `Error` and tacking on `code`, `statusCode`, and `data` properties via assignment, bypassing the typed error hierarchy; now returns a proper `GraphQLError` instance (from `src/errors/index.ts`) so `instanceof` checks, typed catch clauses, and `PanindiganError` base behaviour work correctly
+- **Dead `reqCounter` field** — the `private reqCounter: number` field was incremented in `query()` but never read during `formPost()` routing (each call independently invoked `generateReqParam()`); field removed and `query()` now uses the fixed key `'q0'` for the single-query case, consistent with the batch path which already used index-based keys
+
+#### SessionManager (`src/auth/SessionManager.ts`)
+- **Bare `fetch()` in `refreshSession()`** — the token-refresh step issued a raw `fetch('https://www.facebook.com', ...)` with hardcoded headers and no cookie jar, bypassing the authenticated `RequestHandler` entirely; replaced with `this.requestHandler.get(FACEBOOK_BASE_URL)` which carries the full session cookies, default headers, retry policy, and proxy configuration; a `setRequestHandler()` injection method was added to `SessionManager` and called immediately after construction in `Authenticator`
+
+#### Errors (`src/errors/index.ts`)
+- **Redundant `Object.setPrototypeOf` calls** — `SessionExpiredError`, `TwoFactorRequiredError`, and `TimeoutError` each called `Object.setPrototypeOf(this, new.target.prototype)` explicitly, but the base `PanindiganError` constructor already performs this call unconditionally; the redundant calls have been removed
+
+#### Constants (`src/utils/Constants.ts`)
+- **`Accept-Encoding` header order** — value was `'gzip, deflate, br'` (brotli last); corrected to `'br, gzip, deflate'` so the server-preferred brotli encoding is listed first, matching what Messenger Web sends and what was documented in the `1.2.1` patch notes
+
+---
+
+## [1.2.2] - 2026-07-02
+
+### Added
+
+#### Security Module — EntropyPool (`src/security/EntropyPool.ts`)
+- New `EntropyPool` class: CSPRNG-backed 22-bit seed pool for `offline_threading_id` generation
+- Pre-fills 256 values on startup using `crypto.randomBytes()` (one syscall per batch)
+- `nextOfflineId()` — same format as Messenger Web (`(timestampMs << 22n) | random22bits`) but with cryptographic randomness
+- Auto-refills when pool drops below low-water mark (default 48); configurable via `EntropyPoolOptions`
+- `rotationInterval` forces full pool regeneration every N draws (default 512)
+- `getStats()` — exposes pool depth, draw count, and total refill count for diagnostics
+
+#### Security Module — CheckpointGuard (`src/security/CheckpointGuard.ts`)
+- New `CheckpointGuard` class: automated checkpoint detection and burst-send protection
+- **URL screening** — every response URL is checked against known checkpoint redirect patterns (`/checkpoint/`, `checkpoint_required`, `/login/checkpoint`, etc.)
+- **Body screening** — JSON response body checked for `"checkpoint_required"`, `"checkpoint_url"`, `"verification_required"`, `"CHECKPOINT"`, Facebook error codes `1357007`, `368`
+- **Burst tracking** — sliding 60-second window counting outgoing sends; levels: `safe` (< 20/min), `warn` (20–39/min), `critical` (≥ 40/min)
+- **Adaptive delays** — `recordSend()` returns the delay (ms) the caller should inject: 0 at `safe`, 1 200 ms at `warn`, 4 000 ms at `critical`
+- **State machine** — `'clear' | 'checkpoint' | 'suspended'`; all outgoing sends throw `CheckpointError` when not `'clear'`
+- **Critical burst auto-suspend** — configurable `blockOnCriticalBurst` (default `true`) transitions state to `'suspended'` at ≥ 40/min
+- `onCheckpoint(cb)` — register one or more callbacks fired on checkpoint detection
+- `clearCheckpoint()` — reset state, backoff counter, and burst window after manual challenge resolution
+- `backoffMs()` — exponential backoff sequence: 5 s → 15 s → 45 s → 2 min → 5 min
+- `getStats()` — full diagnostics snapshot (`GuardStats`)
+
+#### Security Module — index re-export (`src/security/index.ts`)
+- Exports `AntiSuspension`, `EntropyPool`, `CheckpointGuard` and all related types
+
+#### Public exports (`src/index.ts`)
+- `EntropyPool`, `EntropyPoolOptions`
+- `CheckpointGuard`, `CheckpointGuardOptions`, `CheckpointCallback`, `GuardState`, `BurstLevel`, `GuardStats`
+
+### Changed
+
+#### RequestHandler (`src/api/RequestHandler.ts`)
+- `setCheckpointGuard(guard)` — new setter; screens every response URL automatically in `executeRequest()`
+
+#### GraphQLClient (`src/api/GraphQLClient.ts`)
+- `setCheckpointGuard(guard)` — new setter; screens response body in `formPost()` and wires guard into the underlying `RequestHandler`
+
+#### MessageSender (`src/messaging/MessageSender.ts`)
+- `setCheckpointGuard(guard)` / `setEntropyPool(pool)` — new setters
+- `sendMessage()` now calls `checkpointGuard.recordSend()` before send (throws `CheckpointError` if blocked; returns adaptive delay which is `await sleep()`'d before the network call)
+- `sendLocation()`, `sendContact()`, `forwardMessage()` all use `this.newOfflineId()` (CSPRNG via pool when available, falls back to `generateOfflineThreadingId()`)
+- `generateOfflineThreadingId()` import retained as fallback; `sleep` import added
+
+#### PanindiganFCA (`src/core/PanindiganFCA.ts`)
+- Instantiates `CheckpointGuard` and `EntropyPool` in constructor
+- Wires both into `GraphQLClient`, `MessageSender` on construction
+- Forwards checkpoint events to `EventEmitter` as `'checkpoint'` events
+- New public methods: `onCheckpoint(cb)`, `isCheckpointed()`, `clearCheckpoint()`, `getBurstLevel()`, `getGuardState()`, `getSecurityStats()`, `getSendsLastMinute()`, `getEntropyStats()`
+
+---
+
+## [1.2.1] - 2026-07-02
+
+### Added
+
+#### Typed Error Classes (`src/errors/index.ts`)
+- `PanindiganError` — base class with `code`, `statusCode`, `retryable`, `data` fields
+- `AuthenticationError`, `CheckpointError`, `MQTTError`, `RateLimitError`, `NetworkError`
+- `UploadError`, `MessageError`, `ThreadError`, `UserError`, `GraphQLError`
+- `SessionExpiredError`, `TwoFactorRequiredError`, `TimeoutError`
+- All subclasses use `Object.setPrototypeOf` for correct `instanceof` behaviour in ESM
+
+#### MQTT Topics (`src/utils/Constants.ts`)
+- Added `MQTT_TOPICS` named constant map covering all topics Messenger Web subscribes to
+- New topics added to `subscribeToTopics()` and `buildBrokerUrl()`: `/orca_presence`, `/orca_typing_notifications`, `/orca_message_notifications`, `/t_notify`, `/t_region_hint`, `/webrtc`, `/webrtc_response`
+- Added constants: `FB_HEADER_LSD`, `FB_HEADER_ASBD`, `FB_HEADER_RESPONSE_FORMAT`
+- Added endpoints: `FACEBOOK_SET_THREAD_IMAGE_URL`, `FACEBOOK_SET_APPROVAL_MODE_URL`, `FACEBOOK_APPROVE_MEMBER_URL`, `FACEBOOK_REJECT_MEMBER_URL`, `FACEBOOK_GET_INVITE_LINK_URL`, `FACEBOOK_JOIN_THREAD_URL`, `FACEBOOK_FOLLOW_URL`, `FACEBOOK_MUTUAL_FRIENDS_URL`, `FACEBOOK_PENDING_REQUESTS_URL`, `FACEBOOK_EDIT_MESSAGE_URL`, `FACEBOOK_FORWARD_MESSAGE_URL`, `FACEBOOK_DELETE_MESSAGE_URL`, `FACEBOOK_SEARCH_MESSAGES_URL`
+
+#### RequestHandler Headers (`src/api/RequestHandler.ts`)
+- Auto-injects `x-fb-lsd` and `x-asbd-id` on every request
+- `Accept-Encoding: br, gzip, deflate` (brotli first)
+- 429 responses now throw `RateLimitError` with `Retry-After` header parsed
+- Jitter added to exponential backoff: `delay * (0.5 + Math.random() * 0.5)`
+- `AbortController` timeout on every fetch (configurable, default 30 s)
+
+#### Event Types (`src/types/events.ts`)
+- `MessageReplyEvent`, `MessageEditEvent`, `MessageUnsendEvent`
+- `ThreadApprovalEvent`, `RegionHintEvent`, `RawEvent`
+- `PanindiganEvent` union and `EventHandlerMap` updated
+
+#### Message Types (`src/types/messages.ts`)
+- `VoiceAttachment`, `ContactAttachment`
+- `SendMessageOptions` extended: `gifUrl`, `voice`, `location`, `contact`, `syncGroup`, `ephemeralTtl`, `initiatingSource`, `clientTags`
+
+#### EventParser new topic handlers (`src/events/EventParser.ts`)
+- `/orca_presence` → delegates to `parsePresence()`
+- `/orca_typing_notifications` → delegates to `parseTypingNotification()`
+- `/orca_message_notifications` → delegates to `parseMessageSync()`
+- `/t_region_hint` → new `parseRegionHint()` → `RegionHintEvent`
+- `/webrtc`, `/webrtc_response` → new `parseWebRTCEvent()` → delegates to `parseRTCEvent()`
+- `editmessage` / `editedMessage` delta class → new `parseMessageEditDelta()` → `MessageEditEvent`
+- `parseUnsendDelta()` now returns correctly-typed `MessageUnsendEvent` (removed `as unknown as PanindiganEvent` cast)
+
+### Changed
+
+#### MessageSender (`src/messaging/MessageSender.ts`)
+- `editMessage(messageId, body)` — real `POST /messaging/edit_message/`
+- `forwardMessage(messageId, threadId, isGroup)` — real `POST /messaging/forward_message/`
+- `sendLocation()` private helper — location as structured JSON attachment in `POST /messaging/send/`
+- `sendContact()` private helper — contact card via `contact_fbid` field in `POST /messaging/send/`
+- Added `sync_group`, `ephemeral_ttl_mode`, `ttl`, `animated_image_url`, `client_tags`, `is_silent` to send payload
+- `REACTION_EMOJIS` map used for canonical reaction name → emoji conversion
+
+#### ThreadManager (`src/threads/ThreadManager.ts`)
+- `setThreadImage(threadId, imageAttachmentId)` — `POST /messaging/set_thread_image/`
+- `setApprovalMode(threadId, enabled)` — `POST /messaging/set_approval_mode/`
+- `approveMember(threadId, userId)` — `POST /messaging/approve_member/`
+- `rejectMember(threadId, userId)` — `POST /messaging/reject_member/`
+- `getInviteLink(threadId)` — `POST /messaging/get_invite_link/`
+- `joinByInviteLink(link)` — `POST /messaging/join_thread/`
+- `deleteMessage(messageId)` — `POST /messaging/delete_message/`
+- `searchMessages(options)` — `POST /ajax/mercury/search.php`
+
+#### UserManager (`src/users/UserManager.ts`)
+- `followUser(userId)` — `POST /ajax/follow/get_follow.php` with `action: 'follow'`
+- `unfollowUser(userId)` — same endpoint with `action: 'unfollow'`
+- `getMutualFriends(userId)` — `POST /ajax/mutual_friends/`
+- `getPendingFriendRequests()` — `POST /ajax/requests/friend/` with `action: 'get_all'`
+- `getSentFriendRequests()` — GraphQL `OutgoingFriendRequestsQuery`
+- `getPresence()` now returns full `Presence` type with `status: 'active' | 'idle' | 'offline'`
+- `parseProfileFromMercury()` — dedicated parser for `/chat/user_info/` Mercury response shape
+
+#### PanindiganFCA (`src/core/PanindiganFCA.ts`)
+- `editMessage()` now delegates to `messageSender.editMessage()` (was calling fake `MessageEditMutation`)
+- `forwardMessage()` now delegates to `messageSender.forwardMessage()` (was calling fake `MessageForwardMutation`)
+- `handleMQTTMessage()` now emits a properly typed `RawEvent` object instead of `('raw', topic, payload)`
+- Added public methods: `searchMessages`, `markAsDelivered`, `changeThreadImage`, `setApprovalMode`, `getInviteLink`, `joinByInviteLink`, `approveMember`, `rejectMember`, `pinMessage`, `unpinMessage`, `deleteMessage`, `deleteThread`, `followUser`, `unfollowUser`, `getMutualFriends`, `getPendingFriendRequests`, `getSentFriendRequests`, `cancelFriendRequest`
+
+#### Types (`src/types/index.ts`)
+- Exports `MessageReplyEvent`, `MessageEditEvent`, `MessageUnsendEvent`, `ThreadApprovalEvent`, `RegionHintEvent`, `RawEvent`, `FriendRequest`, `MessageSearchOptions`, `MessageSearchResult`, `User`
+- Exports typed error classes via `src/errors/index.ts`
+- Added `PanindiganAPI` interface covering the complete public surface
+
+---
+
 ## [1.2.0] - 2026-07-01
 
 ### Changed

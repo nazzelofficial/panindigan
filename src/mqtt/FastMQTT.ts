@@ -6,7 +6,7 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/Logger.js';
-import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS } from '../utils/Constants.js';
+import { MQTT_BROKER_URLS, MQTT_DEFAULT_OPTIONS, MQTT_TOPICS } from '../utils/Constants.js';
 import { generateClientId } from '../utils/Helpers.js';
 import { EventParser } from '../events/EventParser.js';
 import type { Session } from '../types/index.js';
@@ -319,9 +319,10 @@ export class FastMQTT extends EventEmitter {
     }
     
     this.emit('message', packet.topic, packet.payload);
-    
-    const event = this.eventParser.parse(packet.topic, packet.payload);
-    if (event) {
+
+    // parseAll fans bulk presence maps into one event per UID
+    const events = this.eventParser.parseAll(packet.topic, packet.payload);
+    for (const event of events) {
       this.emit(event.type, event);
       this.emit('event', event);
     }
@@ -604,19 +605,26 @@ export class FastMQTT extends EventEmitter {
   }
 
   private subscribeToTopics(): void {
-    const topics = [
-      '/t_ms',
-      '/t_rtc',
-      '/t_p',
-      '/t_tn',
-      '/t_graphql',
-      '/t_messaging_events',
+    const topics: string[] = [
+      MQTT_TOPICS.MESSAGE_SYNC,
+      MQTT_TOPICS.RTC,
+      MQTT_TOPICS.PRESENCE,
+      MQTT_TOPICS.TYPING,
+      MQTT_TOPICS.GRAPHQL,
+      MQTT_TOPICS.MESSAGING_EVENTS,
+      MQTT_TOPICS.NOTIFY,
+      MQTT_TOPICS.REGION_HINT,
       `mqtt_c2b_${this.session.userId}`,
-      '/t_sb',
-      '/t_admin_text',
-      '/t_presence',
-      '/t_msg_body',
-      '/t_delta',
+      MQTT_TOPICS.SUBSCRIPTION,
+      MQTT_TOPICS.ADMIN_TEXT,
+      MQTT_TOPICS.PRESENCE_EXTENDED,
+      MQTT_TOPICS.MESSAGE_BODY,
+      MQTT_TOPICS.DELTA,
+      MQTT_TOPICS.ORCA_PRESENCE,
+      MQTT_TOPICS.ORCA_TYPING,
+      MQTT_TOPICS.ORCA_MESSAGES,
+      MQTT_TOPICS.WEBRTC,
+      MQTT_TOPICS.WEBRTC_RESPONSE,
     ];
     
     for (const topic of topics) {
@@ -628,43 +636,61 @@ export class FastMQTT extends EventEmitter {
     }
   }
 
+  /**
+   * Get next packet ID.
+   * MQTT 3.1.1 §2.3.1: packet identifiers MUST be non-zero (1–65535).
+   */
   private getNextPacketId(): number {
-    this.lastPacketId = (this.lastPacketId + 1) % 65536;
+    this.lastPacketId = (this.lastPacketId % 65535) + 1;
     return this.lastPacketId;
   }
 
   private buildBrokerUrl(): string {
     const baseUrl = MQTT_BROKER_URLS[0];
-    const seqId = this.session.irisSeqId && this.session.irisSeqId !== '0' 
-      ? this.session.irisSeqId 
-      : Math.floor(Date.now() / 1000).toString();
-    
-    const topics = [
-      '/t_ms',
-      '/t_rtc',
-      '/t_p',
-      '/t_tn',
-      '/t_graphql',
-      '/t_messaging_events',
+    const hasValidSeqId = this.session.irisSeqId && this.session.irisSeqId !== '0';
+
+    if (!hasValidSeqId) {
+      logger.warn('FastMQTT: No valid irisSeqId — omitting sid/seq from broker URL');
+    }
+
+    const topics: string[] = [
+      MQTT_TOPICS.MESSAGE_SYNC,
+      MQTT_TOPICS.RTC,
+      MQTT_TOPICS.PRESENCE,
+      MQTT_TOPICS.TYPING,
+      MQTT_TOPICS.GRAPHQL,
+      MQTT_TOPICS.MESSAGING_EVENTS,
+      MQTT_TOPICS.NOTIFY,
+      MQTT_TOPICS.REGION_HINT,
       `mqtt_c2b_${this.session.userId}`,
-      '/t_sb',
-      '/t_admin_text',
-      '/t_presence',
-      '/t_msg_body',
-      '/t_delta',
+      MQTT_TOPICS.SUBSCRIPTION,
+      MQTT_TOPICS.ADMIN_TEXT,
+      MQTT_TOPICS.PRESENCE_EXTENDED,
+      MQTT_TOPICS.MESSAGE_BODY,
+      MQTT_TOPICS.DELTA,
+      MQTT_TOPICS.ORCA_PRESENCE,
+      MQTT_TOPICS.ORCA_TYPING,
+      MQTT_TOPICS.ORCA_MESSAGES,
+      MQTT_TOPICS.WEBRTC,
+      MQTT_TOPICS.WEBRTC_RESPONSE,
     ];
-    
-    const params = [
+
+    const params: string[] = [
       `cid=${encodeURIComponent(this.clientId)}`,
-      `sid=${encodeURIComponent(seqId)}`,
-      `seq=${encodeURIComponent(seqId)}`,
       `user=${encodeURIComponent(this.session.userId)}`,
       `device_id=${encodeURIComponent(this.session.deviceId || '')}`,
       'initial_connection=true',
       'bus_version=3',
       `subscribe_topics=${encodeURIComponent(topics.join(','))}`,
     ];
-    
+
+    if (hasValidSeqId) {
+      params.splice(1, 0,
+        `sid=${encodeURIComponent(this.session.irisSeqId!)}`,
+        `seq=${encodeURIComponent(this.session.irisSeqId!)}`
+      );
+    }
+
     return `${baseUrl}?${params.join('&')}`;
   }
 
@@ -731,7 +757,8 @@ export class FastMQTT extends EventEmitter {
       offset += 2;
     }
     
-    const payload = data.slice(offset);
+    // Use subarray (non-copying) instead of the deprecated Buffer.slice()
+    const payload = data.subarray(offset);
     
     return { type: 'PUBLISH', topic, payload, qos, packetId };
   }

@@ -26,11 +26,13 @@ export type {
   PhotoAttachment,
   VideoAttachment,
   AudioAttachment,
+  VoiceAttachment,
   FileAttachment,
   StickerAttachment,
   GIFAttachment,
   ShareAttachment,
   LocationAttachment,
+  ContactAttachment,
   ReactionType,
   Reaction,
   Message,
@@ -132,6 +134,9 @@ export type {
   EventType,
   BaseEvent,
   MessageEvent,
+  MessageReplyEvent,
+  MessageEditEvent,
+  MessageUnsendEvent,
   MessageReactionEvent,
   TypingEvent,
   ReadReceiptEvent,
@@ -144,6 +149,7 @@ export type {
   ThreadNicknameEvent,
   ThreadParticipantsEvent,
   ThreadAdminEvent,
+  ThreadApprovalEvent,
   ThreadLeaveEvent,
   FriendRequestEvent,
   FriendAcceptEvent,
@@ -153,6 +159,8 @@ export type {
   StoryEvent,
   PollEvent,
   EventPlannerEvent,
+  RegionHintEvent,
+  RawEvent,
   ConnectEvent,
   DisconnectEvent,
   ErrorEvent,
@@ -174,6 +182,24 @@ export type {
   FacebookAPIEndpoints,
   FacebookFormData,
 } from './api.js';
+
+// Error Types
+export {
+  PanindiganError,
+  AuthenticationError,
+  CheckpointError,
+  MQTTError,
+  RateLimitError,
+  NetworkError,
+  UploadError,
+  MessageError,
+  ThreadError,
+  UserError,
+  GraphQLError as GraphQLRequestError,
+  SessionExpiredError,
+  TwoFactorRequiredError,
+  TimeoutError,
+} from '../errors/index.js';
 
 // Poll Types
 export interface PollOption {
@@ -328,7 +354,6 @@ export interface PanindiganAPI {
   login(options: import('./auth.js').LoginOptions): Promise<import('./auth.js').Session>;
   logout(): Promise<void>;
   getSession(): import('./auth.js').Session | null;
-  validateSession(): Promise<import('./auth.js').SessionValidationResult>;
 
   // Messaging
   sendMessage(threadId: string, options: import('./messages.js').SendMessageOptions): Promise<import('./messages.js').SendMessageResult>;
@@ -336,7 +361,7 @@ export interface PanindiganAPI {
   unsendMessage(messageId: string): Promise<boolean>;
   forwardMessage(messageId: string, threadId: string): Promise<import('./messages.js').SendMessageResult>;
   reactToMessage(messageId: string, reaction: import('./messages.js').ReactionType | null): Promise<boolean>;
-  getMessageHistory(threadId: string, options?: import('./threads.js').ThreadHistoryOptions): Promise<import('./threads.js').ThreadHistoryResult>;
+  getMessageHistory(threadId: string, limit?: number): Promise<import('./threads.js').ThreadHistoryResult>;
   searchMessages(options: import('./messages.js').MessageSearchOptions): Promise<import('./messages.js').MessageSearchResult>;
   markAsRead(threadId: string): Promise<boolean>;
   markAsDelivered(threadId: string, messageId: string): Promise<boolean>;
@@ -348,68 +373,48 @@ export interface PanindiganAPI {
   uploadAudio(buffer: Buffer, options?: import('./media.js').AudioUploadOptions): Promise<import('./media.js').UploadResult>;
   uploadDocument(buffer: Buffer, options?: import('./media.js').DocumentUploadOptions): Promise<import('./media.js').UploadResult>;
   downloadAttachment(url: string, options?: import('./media.js').DownloadOptions): Promise<import('./media.js').DownloadResult>;
-  searchStickers(options: import('./media.js').SearchStickersOptions): Promise<import('./media.js').SearchStickersResult>;
-  searchGIFs(options: import('./media.js').SearchGIFOptions): Promise<import('./media.js').SearchGIFResult>;
 
   // Threads
   createGroup(options: import('./threads.js').CreateGroupOptions): Promise<import('./threads.js').Thread>;
   getThreadInfo(threadId: string): Promise<import('./threads.js').Thread>;
-  getThreadList(options?: import('./threads.js').GetThreadListOptions): Promise<import('./threads.js').GetThreadListResult>;
-  updateThread(options: import('./threads.js').UpdateThreadOptions): Promise<boolean>;
+  getThreadList(limit?: number): Promise<import('./threads.js').Thread[]>;
+  updateThread(threadId: string, options: import('./threads.js').UpdateThreadOptions): Promise<boolean>;
   addParticipants(threadId: string, userIds: string[]): Promise<boolean>;
   removeParticipants(threadId: string, userIds: string[]): Promise<boolean>;
   promoteParticipants(threadId: string, userIds: string[]): Promise<boolean>;
   demoteParticipants(threadId: string, userIds: string[]): Promise<boolean>;
   setNickname(threadId: string, userId: string, nickname: string): Promise<boolean>;
+  changeThreadImage(threadId: string, imageAttachmentId: string): Promise<boolean>;
+  setApprovalMode(threadId: string, enabled: boolean): Promise<boolean>;
+  getInviteLink(threadId: string): Promise<string | null>;
+  approveMember(threadId: string, userId: string): Promise<boolean>;
+  rejectMember(threadId: string, userId: string): Promise<boolean>;
   pinMessage(threadId: string, messageId: string): Promise<boolean>;
   unpinMessage(threadId: string, messageId: string): Promise<boolean>;
-  muteThread(threadId: string, duration?: number): Promise<boolean>;
-  unmuteThread(threadId: string): Promise<boolean>;
-  archiveThread(threadId: string): Promise<boolean>;
-  unarchiveThread(threadId: string): Promise<boolean>;
+  muteThread(threadId: string, mute?: boolean): Promise<boolean>;
+  archiveThread(threadId: string, archive?: boolean): Promise<boolean>;
   leaveGroup(threadId: string): Promise<boolean>;
   deleteThread(threadId: string): Promise<boolean>;
+  deleteMessage(messageId: string): Promise<boolean>;
 
   // Users
   getUserInfo(userId: string): Promise<import('./users.js').Profile>;
   getUserInfo(userIds: string[]): Promise<Record<string, import('./users.js').Profile>>;
   searchUsers(query: string, limit?: number): Promise<import('./users.js').SearchUsersResult>;
-  getFriends(options?: import('./users.js').GetFriendsOptions): Promise<import('./users.js').GetFriendsResult>;
+  getFriends(limit?: number): Promise<import('./users.js').GetFriendsResult>;
   sendFriendRequest(userId: string, message?: string): Promise<boolean>;
   acceptFriendRequest(userId: string): Promise<boolean>;
   declineFriendRequest(userId: string): Promise<boolean>;
   cancelFriendRequest(userId: string): Promise<boolean>;
   unfriend(userId: string): Promise<boolean>;
+  followUser(userId: string): Promise<boolean>;
+  unfollowUser(userId: string): Promise<boolean>;
+  getMutualFriends(userId: string): Promise<import('./users.js').User[]>;
+  getPendingFriendRequests(): Promise<import('./users.js').FriendRequest[]>;
   blockUser(userId: string): Promise<boolean>;
   unblockUser(userId: string): Promise<boolean>;
   getBlockedList(): Promise<import('./users.js').GetBlockedListResult>;
-  getPresence(userId: string): Promise<import('./users.js').Presence>;
   getBirthdays(): Promise<import('./users.js').GetBirthdaysResult>;
-
-  // Polls
-  createPoll(options: CreatePollOptions): Promise<Poll>;
-  votePoll(pollId: string, optionIds: string[]): Promise<boolean>;
-  getPollResults(pollId: string): Promise<Poll>;
-
-  // Events
-  createEvent(options: CreateEventOptions): Promise<EventPlanner>;
-  rsvpToEvent(eventId: string, response: 'going' | 'maybe' | 'cant_go'): Promise<boolean>;
-  getEvent(eventId: string): Promise<EventPlanner>;
-
-  // Stories
-  getStories(userId?: string): Promise<Story[]>;
-  viewStory(storyId: string): Promise<boolean>;
-  reactToStory(storyId: string, reaction: string): Promise<boolean>;
-  replyToStory(storyId: string, message: string): Promise<import('./messages.js').SendMessageResult>;
-
-  // Calls
-  initiateCall(threadId: string, isVideo?: boolean): Promise<CallResult>;
-
-  // Location
-  sendLocation(threadId: string, latitude: number, longitude: number, name?: string): Promise<import('./messages.js').SendMessageResult>;
-
-  // Contacts
-  shareContact(threadId: string, contactId: string): Promise<import('./messages.js').SendMessageResult>;
 
   // Events
   on(event: string, listener: (...args: unknown[]) => void): void;
@@ -418,6 +423,6 @@ export interface PanindiganAPI {
 
   // Connection
   connect(): Promise<void>;
-  disconnect(): Promise<void>;
+  disconnect(): void;
   isConnected(): boolean;
 }

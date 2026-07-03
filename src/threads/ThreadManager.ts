@@ -8,9 +8,16 @@ import {
   FACEBOOK_THREAD_LIST_URL,
   FACEBOOK_THREAD_INFO_URL,
   FACEBOOK_THREAD_HISTORY_URL,
+  FACEBOOK_SEARCH_MESSAGES_URL,
   FACEBOOK_SET_NICKNAME_URL,
   FACEBOOK_SET_THREAD_NAME_URL,
+  FACEBOOK_SET_THREAD_IMAGE_URL,
   FACEBOOK_SET_THREAD_SETTINGS_URL,
+  FACEBOOK_SET_APPROVAL_MODE_URL,
+  FACEBOOK_APPROVE_MEMBER_URL,
+  FACEBOOK_REJECT_MEMBER_URL,
+  FACEBOOK_GET_INVITE_LINK_URL,
+  FACEBOOK_JOIN_THREAD_URL,
   FACEBOOK_ADD_PARTICIPANTS_URL,
   FACEBOOK_REMOVE_PARTICIPANT_URL,
   FACEBOOK_LEAVE_GROUP_URL,
@@ -18,6 +25,7 @@ import {
   FACEBOOK_NEW_GROUP_URL,
   FACEBOOK_PIN_MESSAGE_URL,
   FACEBOOK_UNPIN_MESSAGE_URL,
+  FACEBOOK_DELETE_MESSAGE_URL,
   FACEBOOK_ARCHIVE_THREAD_URL,
   FACEBOOK_MUTE_THREAD_URL,
   FACEBOOK_DELETE_THREAD_URL,
@@ -33,6 +41,8 @@ import type {
   ThreadHistoryResult,
   ThreadHistoryOptions,
   Message,
+  MessageSearchOptions,
+  MessageSearchResult,
 } from '../types/index.js';
 
 export class ThreadManager {
@@ -79,11 +89,9 @@ export class ThreadManager {
         };
       }>(FACEBOOK_THREAD_LIST_URL, params);
 
-      const nodes =
-        result?.payload?.viewer?.message_threads?.nodes || [];
+      const nodes = result?.payload?.viewer?.message_threads?.nodes || [];
       const hasMore =
-        result?.payload?.viewer?.message_threads?.page_info
-          ?.has_next_page || false;
+        result?.payload?.viewer?.message_threads?.page_info?.has_next_page || false;
 
       return {
         threads: nodes.map((t) => this.parseThread(t)),
@@ -159,6 +167,45 @@ export class ThreadManager {
   }
 
   /**
+   * Search messages within a thread via POST /ajax/mercury/search.php
+   */
+  async searchMessages(options: MessageSearchOptions): Promise<MessageSearchResult> {
+    const { threadId, query = '', limit = 20, offset = 0 } = options;
+    logger.debug('Searching messages', { threadId, query, limit });
+
+    try {
+      const params: Record<string, string> = {
+        query,
+        limit: String(limit),
+        offset: String(offset),
+      };
+
+      if (threadId) {
+        params['thread_fbid'] = threadId;
+      }
+
+      const result = await this.graphqlClient.formPost<{
+        payload?: {
+          messages?: unknown[];
+          total?: number;
+        };
+      }>(FACEBOOK_SEARCH_MESSAGES_URL, params);
+
+      const messages = result?.payload?.messages || [];
+      const totalCount = result?.payload?.total;
+
+      return {
+        messages: messages.map((m) => this.parseMessage(m)),
+        hasMore: messages.length === limit,
+        totalCount,
+      };
+    } catch (error) {
+      logger.error('Failed to search messages', error);
+      throw error;
+    }
+  }
+
+  /**
    * Create a new group via POST /messaging/new_group_thread/
    */
   async createGroup(options: CreateGroupOptions): Promise<Thread> {
@@ -169,6 +216,10 @@ export class ThreadManager {
       options.participantIds.forEach((uid, i) => {
         params[`to[${i}]`] = uid;
       });
+      // Include the group name when provided
+      if (options.name) {
+        params['thread_name'] = options.name;
+      }
 
       const result = await this.graphqlClient.formPost<{
         payload?: { thread?: unknown };
@@ -357,6 +408,121 @@ export class ThreadManager {
   }
 
   /**
+   * Change thread image (group photo) via POST /messaging/set_thread_image/
+   * Pass a pre-uploaded image attachment ID.
+   */
+  async setThreadImage(threadId: string, imageAttachmentId: string): Promise<boolean> {
+    logger.debug('Setting thread image', { threadId, imageAttachmentId });
+
+    try {
+      await this.graphqlClient.formPost(FACEBOOK_SET_THREAD_IMAGE_URL, {
+        thread_fbid: threadId,
+        image_id: imageAttachmentId,
+      });
+      return true;
+    } catch (error) {
+      logger.error('Failed to set thread image', error);
+      return false;
+    }
+  }
+
+  /**
+   * Enable or disable approval mode (join requests must be approved by admins)
+   * via POST /messaging/set_approval_mode/
+   */
+  async setApprovalMode(threadId: string, enabled: boolean): Promise<boolean> {
+    logger.debug('Setting approval mode', { threadId, enabled });
+
+    try {
+      await this.graphqlClient.formPost(FACEBOOK_SET_APPROVAL_MODE_URL, {
+        thread_fbid: threadId,
+        approval_mode: enabled ? '1' : '0',
+      });
+      return true;
+    } catch (error) {
+      logger.error('Failed to set approval mode', error);
+      return false;
+    }
+  }
+
+  /**
+   * Approve a pending member join request via POST /messaging/approve_member/
+   */
+  async approveMember(threadId: string, userId: string): Promise<boolean> {
+    logger.debug('Approving member', { threadId, userId });
+
+    try {
+      await this.graphqlClient.formPost(FACEBOOK_APPROVE_MEMBER_URL, {
+        thread_fbid: threadId,
+        uid: userId,
+      });
+      return true;
+    } catch (error) {
+      logger.error('Failed to approve member', error);
+      return false;
+    }
+  }
+
+  /**
+   * Reject a pending member join request via POST /messaging/reject_member/
+   */
+  async rejectMember(threadId: string, userId: string): Promise<boolean> {
+    logger.debug('Rejecting member', { threadId, userId });
+
+    try {
+      await this.graphqlClient.formPost(FACEBOOK_REJECT_MEMBER_URL, {
+        thread_fbid: threadId,
+        uid: userId,
+      });
+      return true;
+    } catch (error) {
+      logger.error('Failed to reject member', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get (or generate) an invite link for a group via POST /messaging/get_invite_link/
+   */
+  async getInviteLink(threadId: string): Promise<string | null> {
+    logger.debug('Getting invite link', { threadId });
+
+    try {
+      const result = await this.graphqlClient.formPost<{
+        payload?: { link?: string; invite_link?: string };
+      }>(FACEBOOK_GET_INVITE_LINK_URL, {
+        thread_fbid: threadId,
+      });
+
+      return result?.payload?.link || result?.payload?.invite_link || null;
+    } catch (error) {
+      logger.error('Failed to get invite link', error);
+      return null;
+    }
+  }
+
+  /**
+   * Join a group via an invite link via POST /messaging/join_thread/
+   */
+  async joinByInviteLink(link: string): Promise<Thread | null> {
+    logger.debug('Joining thread by invite link', { link });
+
+    try {
+      const result = await this.graphqlClient.formPost<{
+        payload?: { thread?: unknown };
+      }>(FACEBOOK_JOIN_THREAD_URL, {
+        link,
+      });
+
+      const thread = result?.payload?.thread;
+      return thread ? this.parseThread(thread) : null;
+    } catch (error) {
+      logger.error('Failed to join thread by invite link', error);
+      return null;
+    }
+  }
+
+  /**
    * Pin a message via POST /messaging/pin_message/
    */
   async pinMessage(threadId: string, messageId: string): Promise<boolean> {
@@ -388,6 +554,23 @@ export class ThreadManager {
       return true;
     } catch (error) {
       logger.error('Failed to unpin message', error);
+      return false;
+    }
+  }
+
+  /**
+   * Delete a specific message (for yourself) via POST /messaging/delete_message/
+   */
+  async deleteMessage(messageId: string): Promise<boolean> {
+    logger.debug('Deleting message', { messageId });
+
+    try {
+      await this.graphqlClient.formPost(FACEBOOK_DELETE_MESSAGE_URL, {
+        message_ids: messageId,
+      });
+      return true;
+    } catch (error) {
+      logger.error('Failed to delete message', error);
       return false;
     }
   }
@@ -476,6 +659,39 @@ export class ThreadManager {
     const t = data as Record<string, unknown>;
     const threadKey = t.thread_key as Record<string, unknown> | undefined;
 
+    // Parse participants from the response when available
+    const rawParticipants = t.participants as Array<Record<string, unknown>> | undefined;
+    const participants = Array.isArray(rawParticipants)
+      ? rawParticipants.map((p) => ({
+          userId: String(p.user_id || p.fbid || p.id || ''),
+          name: String((p.name as Record<string, unknown>)?.text || p.name || 'Unknown'),
+          nickname: p.nickname as string | undefined,
+          isAdmin: !!(p.is_admin),
+          isUser: !!(p.is_user),
+        }))
+      : [];
+
+    const participantIds = participants.map((p) => p.userId).filter(Boolean);
+
+    // Parse admin IDs from the response when available
+    const rawAdmins = t.admin_ids as Array<Record<string, unknown> | string> | undefined;
+    const adminIds = Array.isArray(rawAdmins)
+      ? rawAdmins.map((a) =>
+          typeof a === 'string' ? a : String((a as Record<string, unknown>).id || '')
+        ).filter(Boolean)
+      : participants.filter((p) => p.isAdmin).map((p) => p.userId).filter(Boolean);
+
+    // Parse nicknames map
+    const rawNicknames = t.all_participants as Array<Record<string, unknown>> | undefined;
+    const nicknames: Record<string, string> = {};
+    if (Array.isArray(rawNicknames)) {
+      for (const p of rawNicknames) {
+        if (p.user_id && p.nickname) {
+          nicknames[String(p.user_id)] = String(p.nickname);
+        }
+      }
+    }
+
     return {
       threadId: String(
         threadKey?.thread_fb_id ||
@@ -486,33 +702,26 @@ export class ThreadManager {
       ),
       type: this.parseThreadType(t.thread_type as string),
       name: t.name as string | undefined,
-      participants: [],
-      participantIds: [],
+      participants,
+      participantIds,
       unreadCount: Number(t.unread_count) || 0,
       messageCount: Number(t.messages_count) || undefined,
       lastMessageTimestamp:
-        Number(
-          (t.last_message as Record<string, unknown>)?.timestamp
-        ) || undefined,
+        Number((t.last_message as Record<string, unknown>)?.timestamp) || undefined,
       lastReadTimestamp: Number(t.last_read_timestamp) || undefined,
       isArchived: !!(t.is_archived),
       isMuted: !!(t.is_muted),
       isPinned: !!(t.is_pinned),
       color: t.theme_color as ThreadColor | undefined,
       emoji: t.theme_emoji as string | undefined,
-      adminIds: [],
+      adminIds,
       approvalMode: !!(t.approval_mode),
       joinLink: t.join_link as string | undefined,
       description: t.description as string | undefined,
       image: t.image as string | undefined,
-      nicknames: {},
+      nicknames,
       pinnedMessages: [],
-      folder: t.folder as
-        | 'inbox'
-        | 'archive'
-        | 'pending'
-        | 'other'
-        | undefined,
+      folder: t.folder as 'inbox' | 'archive' | 'pending' | 'other' | undefined,
     };
   }
 
@@ -538,9 +747,7 @@ export class ThreadManager {
     return {
       messageId: String(m.message_id || meta?.message_id || ''),
       threadId: String(
-        threadKey?.thread_fb_id ||
-          threadKey?.other_user_id ||
-          ''
+        threadKey?.thread_fb_id || threadKey?.other_user_id || ''
       ),
       senderId: String(meta?.actor_fb_id || m.sender_id || ''),
       body: m.body as string | undefined,

@@ -9,7 +9,8 @@ import type { Session, AppState, SessionValidationResult } from '../types/index.
 import { CookieParser } from './CookieParser.js';
 import { logger } from '../utils/Logger.js';
 import { generateDeviceId, generateUUID, extractIrisSeqId } from '../utils/Helpers.js';
-import { SESSION_SETTINGS } from '../utils/Constants.js';
+import { SESSION_SETTINGS, FACEBOOK_BASE_URL } from '../utils/Constants.js';
+import type { RequestHandler } from '../api/RequestHandler.js';
  
 export class SessionManager {
   private session: Session | null = null;
@@ -17,10 +18,19 @@ export class SessionManager {
   private sessionPath?: string;
   private refreshInterval?: NodeJS.Timeout;
   private validationInterval?: NodeJS.Timeout;
+  private requestHandler?: RequestHandler;
  
   constructor(cookieJar: CookieJar, sessionPath?: string) {
     this.cookieJar = cookieJar;
     this.sessionPath = sessionPath;
+  }
+
+  /**
+   * Inject the RequestHandler so refreshSession() can use the authenticated
+   * cookie-aware client instead of a bare fetch().
+   */
+  setRequestHandler(handler: RequestHandler): void {
+    this.requestHandler = handler;
   }
  
   /**
@@ -186,35 +196,34 @@ export class SessionManager {
       }));
       this.session.lastActive = new Date();
  
-      // Auto-refresh fb_dtsg token by fetching Facebook homepage
-      try {
-        const response = await fetch('https://www.facebook.com', {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-          },
-        });
+      // Auto-refresh fb_dtsg token by fetching Facebook homepage via the
+      // authenticated RequestHandler (cookie-jar, retry policy, headers).
+      if (!this.requestHandler) {
+        logger.warn('No RequestHandler set on SessionManager — skipping token refresh. Call setRequestHandler() after construction.');
+      } else {
+        try {
+          const response = await this.requestHandler.get(FACEBOOK_BASE_URL);
  
-        if (response.ok) {
-          const html = await response.text();
-          const fbDtsgMatch = html.match(/"DTSGInitialData",\s*\[\],\s*{"token":"([^"]+)"/);
-          if (fbDtsgMatch && fbDtsgMatch[1]) {
-            this.session.fbDtsg = fbDtsgMatch[1];
-            logger.info('Auto-refreshed fb_dtsg token');
-          }
+          if (response.ok) {
+            const html = await response.text();
+            const fbDtsgMatch = html.match(/"DTSGInitialData",\s*\[\],\s*{"token":"([^"]+)"/);
+            if (fbDtsgMatch && fbDtsgMatch[1]) {
+              this.session.fbDtsg = fbDtsgMatch[1];
+              logger.info('Auto-refreshed fb_dtsg token');
+            }
  
-          // Extract iris sequence ID if available (tries all known response formats)
-          const extractedSeqId = extractIrisSeqId(html);
-          if (extractedSeqId) {
-            this.session.irisSeqId = extractedSeqId;
-            logger.info('Auto-refreshed iris sequence ID');
-          } else {
-            logger.warn('Could not extract iris sequence ID from refreshed HTML');
+            // Extract iris sequence ID if available (tries all known response formats)
+            const extractedSeqId = extractIrisSeqId(html);
+            if (extractedSeqId) {
+              this.session.irisSeqId = extractedSeqId;
+              logger.info('Auto-refreshed iris sequence ID');
+            } else {
+              logger.warn('Could not extract iris sequence ID from refreshed HTML');
+            }
           }
+        } catch (tokenError) {
+          logger.warn('Failed to auto-refresh tokens, continuing with existing tokens', tokenError);
         }
-      } catch (tokenError) {
-        logger.warn('Failed to auto-refresh tokens, continuing with existing tokens', tokenError);
       }
  
       // Save if path is set

@@ -126,7 +126,9 @@ export class CookieParser {
       throw new Error('Invalid c3c-fbstate input type');
     }
 
-    return cookies.map((c) => this.normalizeCookie(c, 'c3c-fbstate'));
+    return cookies
+      .map((c) => this.normalizeCookie(c, 'c3c-fbstate'))
+      .filter((c): c is Cookie => c !== null);
   }
 
   /**
@@ -147,7 +149,9 @@ export class CookieParser {
       throw new Error('Invalid FCA input type');
     }
 
-    return cookies.map((c) => this.normalizeCookie(c, 'fca-unofficial'));
+    return cookies
+      .map((c) => this.normalizeCookie(c, 'fca-unofficial'))
+      .filter((c): c is Cookie => c !== null);
   }
 
   /**
@@ -170,7 +174,7 @@ export class CookieParser {
 
     return cookies
       .map((c) => this.normalizeCookie(c, 'browser'))
-      .filter(c => c !== null);
+      .filter((c): c is Cookie => c !== null);
   }
 
   /**
@@ -203,24 +207,25 @@ export class CookieParser {
   }
 
   /**
-   * Normalize a cookie object to internal format
+   * Normalize a cookie object to internal format.
+   * Returns null if the cookie is malformed (key/name is missing).
    */
-  private static normalizeCookie(cookie: unknown, sourceFormat: string): Cookie {
+  private static normalizeCookie(cookie: unknown, sourceFormat: string): Cookie | null {
     if (typeof cookie !== 'object' || cookie === null) {
-      throw new Error(`Invalid cookie object from ${sourceFormat}`);
+      return null;
     }
 
     const c = cookie as Record<string, unknown>;
 
     // Map various field names to our standard format
-    const key = (c.key || c.name || c.Name) as string;
+    const key = (c.key || c.name || c.Name) as string | undefined;
     const value = (c.value || c.Value || c.val) as unknown;
-    const domain = (c.domain || c.Domain || c.domains) as string;
+    const domain = (c.domain || c.Domain || c.domains) as string | undefined;
     const path = (c.path || c.Path || '/') as string;
 
     if (!key || typeof key !== 'string') {
-      logger.warn('Cookie missing key/name field', { cookie, sourceFormat });
-      return null as any; // Filtered out below
+      logger.warn('Cookie missing key/name field — skipping', { sourceFormat });
+      return null;
     }
 
     // Ensure value is a string, handling various types
@@ -329,7 +334,7 @@ export class CookieParser {
 
     if (typeof input === 'object' && input !== null) {
       const obj = input as Record<string, unknown>;
-      
+
       if (obj.cookies && Array.isArray(obj.cookies)) {
         return {
           cookies: this.parse(obj.cookies),
