@@ -133,7 +133,7 @@ export const FB_HEADER_RESPONSE_FORMAT = 'x-response-format-ver';
 
 // User Agents
 export const DEFAULT_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
 
 // API Request Headers — mirroring what Messenger Web sends
 export const DEFAULT_HEADERS: Record<string, string> = {
@@ -147,7 +147,7 @@ export const DEFAULT_HEADERS: Record<string, string> = {
   Origin: 'https://www.facebook.com',
   Pragma: 'no-cache',
   Referer: 'https://www.facebook.com/',
-  'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+  'Sec-Ch-Ua': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
   'Sec-Ch-Ua-Mobile': '?0',
   'Sec-Ch-Ua-Platform': '"Windows"',
   'Sec-Fetch-Dest': 'empty',
@@ -157,7 +157,13 @@ export const DEFAULT_HEADERS: Record<string, string> = {
   [FB_HEADER_RESPONSE_FORMAT]: '1',
 };
 
-// GraphQL Document IDs (Facebook's internal query registry)
+/**
+ * @deprecated These doc_ids are not used by any operation in this library
+ * (all operations use form-encoded REST, not registered doc_id queries) and
+ * were never kept in sync with Facebook's internal registry. Kept here to
+ * avoid a breaking API change in 1.3.x; will be removed in a future major
+ * version.
+ */
 export const GRAPHQL_DOC_IDS = {
   THREAD_LIST: '3336396659756583',
   THREAD_INFO: '4637567869602765',
@@ -175,7 +181,11 @@ export const GRAPHQL_DOC_IDS = {
   STICKER_SEARCH: '3223872657675734',
 } as const;
 
-// GraphQL Queries (legacy names kept for compatibility)
+/**
+ * @deprecated These operation names are not used by any operation in this
+ * library (all operations use form-encoded REST). Kept here to avoid a
+ * breaking API change in 1.3.x; will be removed in a future major version.
+ */
 export const GRAPHQL_QUERIES = {
   GET_THREAD_LIST: 'ThreadListQuery',
   GET_THREAD_INFO: 'ThreadInfoQuery',

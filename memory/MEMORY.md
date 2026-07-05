@@ -10,3 +10,4 @@
 - [MQTT reconnect pattern](mqtt-reconnect-pattern.md) — MQTTClient is the client actually wired into PanindiganFCA; keep its reconnect/health-check logic in sync with FastMQTT's
 - [Facebook lsd token vs fb_dtsg](facebook-lsd-token.md) — real lsd token must be extracted/reused like fb_dtsg, never faked/omitted, or GraphQL calls get rejected
 - [Facebook revision fingerprint](facebook-revision-fingerprint.md) — __rev/__spin_r/__spin_b/__spin_t/__hsi must be extracted from real HTML like fb_dtsg/lsd, never hardcoded/random
+- [GraphQL audit v1.3.2](graphql-audit-v132.md) — TokenProvider pattern, detectSessionExpiry signals, __rev fix, GRAPHQL_DOC_IDS deprecation-not-removal rule

@@ -9,7 +9,7 @@ import {
   ERROR_CODES,
 } from '../utils/Constants.js';
 import { generateReqParam, generateRandomString } from '../utils/Helpers.js';
-import { GraphQLError } from '../errors/index.js';
+import { GraphQLError, SessionExpiredError } from '../errors/index.js';
 import type { RequestHandler } from './RequestHandler.js';
 import type { CheckpointGuard } from '../security/CheckpointGuard.js';
 import type {
@@ -19,12 +19,24 @@ import type {
   FacebookFormData,
 } from '../types/index.js';
 
+/**
+ * Callback that returns the latest auth tokens from the active session.
+ * Set via setTokenProvider() so GraphQLClient always uses fresh token values
+ * rather than potentially stale copies set at login time.
+ */
+type TokenProvider = () => {
+  fbDtsg: string;
+  userId: string;
+  lsd: string;
+};
+
 export class GraphQLClient {
   private requestHandler: RequestHandler;
   private fbDtsg: string = '';
   private userId: string = '';
   private lsd: string = '';
   private checkpointGuard?: CheckpointGuard;
+  private tokenProvider?: TokenProvider;
 
   /**
    * Real Facebook build/revision fingerprint (`__spin_r`/`__spin_b`/`__spin_t`
@@ -47,9 +59,8 @@ export class GraphQLClient {
    * `__spin_r`/`__spin_b`/`__spin_t`/`__hsi` bundle above. Real FCA
    * implementations (fca-unofficial, ws3-fca) send this on every
    * legacy form-encoded request (e.g. `/chat/user_info/`) independent of
-   * whether the full Comet fingerprint was ever obtained — see
-   * buildBaseParams(). Never fabricated; stays empty until real HTML
-   * supplies it.
+   * whether the full Comet fingerprint was ever obtained. Never fabricated;
+   * stays empty until real HTML supplies it.
    */
   private revision: string = '';
 
@@ -102,6 +113,19 @@ export class GraphQLClient {
   }
 
   /**
+   * Register a token provider callback. When set, GraphQLClient calls this
+   * before every request to pull the latest `fbDtsg`, `userId`, and `lsd`
+   * values from the active session. This ensures stale token copies from
+   * login time do not persist across a session refresh cycle.
+   *
+   * Wire this up in Authenticator's constructor by passing a function that
+   * reads directly from SessionManager.getSession().
+   */
+  setTokenProvider(fn: TokenProvider): void {
+    this.tokenProvider = fn;
+  }
+
+  /**
    * Get request handler
    */
   getRequestHandler(): RequestHandler {
@@ -115,6 +139,58 @@ export class GraphQLClient {
   setCheckpointGuard(guard: CheckpointGuard): void {
     this.checkpointGuard = guard;
     this.requestHandler.setCheckpointGuard(guard);
+  }
+
+  /**
+   * Sync auth tokens from the registered TokenProvider, if one was set.
+   * Only overwrites a stored value when the provider returns a non-empty
+   * string, so a partially-populated session does not clear a valid token.
+   */
+  private syncTokens(): void {
+    if (!this.tokenProvider) return;
+    const t = this.tokenProvider();
+    if (t.fbDtsg) this.fbDtsg = t.fbDtsg;
+    if (t.userId) this.userId = t.userId;
+    if (t.lsd) this.lsd = t.lsd;
+  }
+
+  /**
+   * Check a parsed Facebook response payload for known session-expiry signals
+   * and throw SessionExpiredError when found. Prevents callers from seeing a
+   * confusing generic GraphQLError when the real cause is an expired session.
+   *
+   * Known signals (all confirmed from real Facebook API traffic):
+   *   - `error: 1357001`       — Facebook's canonical "not logged in" error code
+   *   - `login_required: true`  — explicit flag on some endpoints
+   *   - `errorDescription` containing "must be logged in" or "session expired"
+   *   - Nested `errors` array entry whose `code` is 1357001
+   */
+  private detectSessionExpiry(
+    data: Record<string, unknown>,
+    context: { url: string; operation?: string; requestId?: string }
+  ): void {
+    const errCode = data.error as number | string | undefined;
+    const errDesc = (data.errorDescription ?? data.error_description) as string | undefined;
+    const loginRequired = data.login_required as boolean | undefined;
+    const errors = data.errors as Array<{ code?: string | number; message?: string }> | undefined;
+
+    const isExpired =
+      loginRequired === true ||
+      errCode === 1357001 ||
+      errCode === '1357001' ||
+      (typeof data.errorCode === 'number' && data.errorCode === 1357001) ||
+      (typeof errDesc === 'string' && (
+        errDesc.toLowerCase().includes('must be logged in') ||
+        (errDesc.toLowerCase().includes('session') && errDesc.toLowerCase().includes('expired'))
+      )) ||
+      (Array.isArray(errors) && errors.some(
+        (e) => e.code === 1357001 || e.code === '1357001'
+      ));
+
+    if (isExpired) {
+      logger.warn('Session expiry detected in API response', { ...context });
+      throw new SessionExpiredError({ ...context, data });
+    }
   }
 
   /**
@@ -150,7 +226,7 @@ export class GraphQLClient {
 
     // Only attach the full Comet build/revision fingerprint once it has
     // actually been extracted from live HTML (see setRevisionInfo docs) —
-    // never a fabricated placeholder. Used by the full webgraphql
+    // never a fabricated placeholder. Used by the full api/graphql/
     // query()/executeBatch() calls below, not by formPost().
     if (this.hasRevisionInfo()) {
       params.__spin_r = this.spinR;
@@ -168,11 +244,14 @@ export class GraphQLClient {
   /**
    * POST a form-encoded request to any Facebook endpoint.
    * Handles the for(;;); prefix stripping automatically.
+   * Syncs tokens from session before sending.
    */
   async formPost<T = unknown>(
     url: string,
     params: Record<string, string>
   ): Promise<T> {
+    this.syncTokens();
+
     const payload: Record<string, string> = {
       ...this.buildBaseParams(),
       ...params,
@@ -185,6 +264,7 @@ export class GraphQLClient {
       this.encodeFormData(payload)
     );
 
+    const requestId = response.headers.get('x-fb-request-id') ?? undefined;
     const text = await response.text();
 
     // Screen body for checkpoint signals before parsing
@@ -196,21 +276,37 @@ export class GraphQLClient {
     try {
       data = JSON.parse(jsonStr);
     } catch {
+      logger.error('formPost: unparseable response', {
+        url,
+        httpStatus: response.status,
+        requestId,
+        body: text.substring(0, 500),
+      });
       throw this.createGraphQLError(
         ERROR_CODES.API_ERROR,
         `Failed to parse response from ${url}: ${text.substring(0, 200)}`,
-        0
+        response.status
       );
     }
 
+    // Detect session expiry before surfacing as a generic API error
+    this.detectSessionExpiry(data, { url, requestId });
+
     if (data.error) {
+      const errMsg = String(
+        data.errorDescription || data.errorSummary || data.error
+      );
+      logger.error('formPost: Facebook error in response', {
+        url,
+        httpStatus: response.status,
+        requestId,
+        error: data.error,
+        errorDescription: data.errorDescription,
+        errorSummary: data.errorSummary,
+      });
       throw this.createGraphQLError(
         ERROR_CODES.API_ERROR,
-        String(
-          (data as Record<string, unknown>).errorDescription ||
-            (data as Record<string, unknown>).errorSummary ||
-            data.error
-        ),
+        errMsg,
         Number(data.error)
       );
     }
@@ -219,13 +315,15 @@ export class GraphQLClient {
   }
 
   /**
-   * Make a single GraphQL query
+   * Make a single GraphQL query against /api/graphql/
    */
   async query<T = unknown>(
     queryName: string,
     variables: Record<string, unknown> = {},
     queryDoc?: string
   ): Promise<T> {
+    this.syncTokens();
+
     if (!this.hasRevisionInfo()) {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
@@ -235,17 +333,18 @@ export class GraphQLClient {
       );
     }
 
-    // Built from buildBaseParams()/buildFormData() first, then Comet-specific
-    // fields override on top — never the other way around, so a stale
-    // fabricated placeholder (there is none anymore, but this ordering is
-    // what prevents that class of bug) can't silently clobber a real
-    // extracted value like __spin_r.
+    // Built from buildFormData() first, then Comet-specific fields override
+    // on top so extracted fingerprint values like __spin_r are never
+    // clobbered by stale base defaults.
     const payload: Record<string, string> = {
       ...this.buildFormData(),
       av: this.userId,
       __user: this.userId,
       __req: generateReqParam(),
-      __rev: this.spinR,
+      // __rev: prefer the plain page revision; fall back to __spin_r
+      // (they are the same value in practice, but __rev should be the
+      // dedicated plain numeric revision, not the spin fingerprint).
+      __rev: this.revision || this.spinR,
       __spin_r: this.spinR,
       __spin_b: this.spinB,
       __spin_t: this.spinT,
@@ -257,6 +356,7 @@ export class GraphQLClient {
       fb_dtsg: this.fbDtsg,
       jazoest: this.generateJazoest(),
       lsd: this.lsd,
+      fb_api_req_friendly_name: queryName,
     };
 
     // Add the query (key is always q0 for a single-query call)
@@ -273,7 +373,15 @@ export class GraphQLClient {
       this.encodeFormData(payload)
     );
 
+    const requestId = response.headers.get('x-fb-request-id') ?? undefined;
+
     if (!response.ok) {
+      logger.error('GraphQL query: non-2xx response', {
+        operation: queryName,
+        url: FACEBOOK_WEBGRAPHQL_URL,
+        httpStatus: response.status,
+        requestId,
+      });
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         `GraphQL request failed: ${response.status} ${response.statusText}`,
@@ -290,6 +398,13 @@ export class GraphQLClient {
     try {
       data = JSON.parse(jsonStr);
     } catch {
+      logger.error('GraphQL query: failed to parse response', {
+        operation: queryName,
+        url: FACEBOOK_WEBGRAPHQL_URL,
+        httpStatus: response.status,
+        requestId,
+        body: text.substring(0, 500),
+      });
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         'Failed to parse GraphQL response',
@@ -298,8 +413,21 @@ export class GraphQLClient {
       );
     }
 
+    // Detect session expiry before surfacing as a generic GraphQL error
+    this.detectSessionExpiry(
+      data as unknown as Record<string, unknown>,
+      { url: FACEBOOK_WEBGRAPHQL_URL, operation: queryName, requestId }
+    );
+
     if (data.errors && data.errors.length > 0) {
       const error = data.errors[0];
+      logger.error('GraphQL query: error in response', {
+        operation: queryName,
+        url: FACEBOOK_WEBGRAPHQL_URL,
+        httpStatus: response.status,
+        requestId,
+        errors: data.errors,
+      });
       throw this.createGraphQLError(
         error.code || ERROR_CODES.GRAPHQL_ERROR,
         error.message,
@@ -309,6 +437,13 @@ export class GraphQLClient {
     }
 
     if (!data.data) {
+      logger.error('GraphQL query: empty data in response', {
+        operation: queryName,
+        url: FACEBOOK_WEBGRAPHQL_URL,
+        httpStatus: response.status,
+        requestId,
+        body: text.substring(0, 500),
+      });
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         'No data in GraphQL response',
@@ -321,17 +456,16 @@ export class GraphQLClient {
   }
 
   /**
-   * Make a batch of GraphQL queries (optimized)
-   * Automatically splits large batches into smaller chunks for better performance
+   * Make a batch of GraphQL queries (optimized).
+   * Automatically splits large batches into smaller chunks.
    */
   async batchQuery(batch: BatchRequest): Promise<BatchResponse> {
-    const MAX_BATCH_SIZE = 50; // Facebook's recommended batch size
+    const MAX_BATCH_SIZE = 50;
 
     if (batch.queries.length <= MAX_BATCH_SIZE) {
       return this.executeBatch(batch);
     }
 
-    // Split into multiple batches if too large
     const chunks: BatchRequest[] = [];
     for (let i = 0; i < batch.queries.length; i += MAX_BATCH_SIZE) {
       chunks.push({
@@ -343,12 +477,10 @@ export class GraphQLClient {
       `Splitting ${batch.queries.length} queries into ${chunks.length} batches`
     );
 
-    // Execute all batches in parallel
     const results = await Promise.all(
       chunks.map((chunk) => this.executeBatch(chunk))
     );
 
-    // Combine results
     const allResponses: BatchResponse['responses'] = [];
     for (const result of results) {
       allResponses.push(...result.responses);
@@ -358,9 +490,11 @@ export class GraphQLClient {
   }
 
   /**
-   * Execute a single batch query
+   * Execute a single batch of GraphQL queries against /api/graphqlbatch/
    */
   private async executeBatch(batch: BatchRequest): Promise<BatchResponse> {
+    this.syncTokens();
+
     if (!this.hasRevisionInfo()) {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
@@ -370,14 +504,14 @@ export class GraphQLClient {
       );
     }
 
-    // See query()'s payload construction comment — buildFormData() spreads
-    // first so Comet-specific fields always win, never get clobbered.
+    // buildFormData() spreads first so Comet-specific fields always win,
+    // never get clobbered by a stale base default.
     const payload: Record<string, string> = {
       ...this.buildFormData(),
       av: this.userId,
       __user: this.userId,
       __req: generateReqParam(),
-      __rev: this.spinR,
+      __rev: this.revision || this.spinR,
       __spin_r: this.spinR,
       __spin_b: this.spinB,
       __spin_t: this.spinT,
@@ -391,25 +525,30 @@ export class GraphQLClient {
       lsd: this.lsd,
     };
 
-    // Add batch queries with optimized indexing
     batch.queries.forEach((q, index) => {
-      const queryKey = `q${index}`;
-      payload[queryKey] = JSON.stringify({
+      payload[`q${index}`] = JSON.stringify({
         name: q.name,
         variables: JSON.stringify(q.variables || {}),
       });
     });
 
-    logger.debug(
-      `GraphQL Batch: ${batch.queries.map((q) => q.name).join(', ')}`
-    );
+    const operationNames = batch.queries.map((q) => q.name).join(', ');
+    logger.debug(`GraphQL Batch: ${operationNames}`);
 
     const response = await this.requestHandler.post(
       FACEBOOK_BATCH_URL,
       this.encodeFormData(payload)
     );
 
+    const requestId = response.headers.get('x-fb-request-id') ?? undefined;
+
     if (!response.ok) {
+      logger.error('GraphQL batch: non-2xx response', {
+        operations: operationNames,
+        url: FACEBOOK_BATCH_URL,
+        httpStatus: response.status,
+        requestId,
+      });
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         `Batch request failed: ${response.status} ${response.statusText}`,
@@ -424,6 +563,13 @@ export class GraphQLClient {
     try {
       data = JSON.parse(jsonStr);
     } catch {
+      logger.error('GraphQL batch: failed to parse response', {
+        operations: operationNames,
+        url: FACEBOOK_BATCH_URL,
+        httpStatus: response.status,
+        requestId,
+        body: text.substring(0, 500),
+      });
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
         'Failed to parse batch response',
@@ -432,34 +578,46 @@ export class GraphQLClient {
       );
     }
 
-    // Parse responses with error handling per query
-    const responses: BatchResponse['responses'] = batch.queries.map(
-      (q, index) => {
-        const key = `q${index}`;
-        const responseData = data[key] as GraphQLResponse<unknown>;
+    // Detect session expiry in batch response
+    this.detectSessionExpiry(data, {
+      url: FACEBOOK_BATCH_URL,
+      operation: operationNames,
+      requestId,
+    });
 
-        if (!responseData) {
-          return {
-            name: q.name,
-            data: null,
-            error: { message: `No response for query ${q.name}` },
-          };
-        }
+    const responses: BatchResponse['responses'] = batch.queries.map((q, index) => {
+      const key = `q${index}`;
+      const responseData = data[key] as GraphQLResponse<unknown>;
 
+      if (!responseData) {
         return {
           name: q.name,
-          data: responseData?.data,
-          error: responseData?.errors?.[0],
+          data: null,
+          error: { message: `No response for query ${q.name}` },
         };
       }
-    );
+
+      if (responseData?.errors?.length) {
+        logger.debug('GraphQL batch: per-query error', {
+          operation: q.name,
+          requestId,
+          errors: responseData.errors,
+        });
+      }
+
+      return {
+        name: q.name,
+        data: responseData?.data,
+        error: responseData?.errors?.[0],
+      };
+    });
 
     return { responses };
   }
 
   /**
-   * Make a GraphQL mutation
-   * Uses /webgraphql/query endpoint for personal Facebook accounts (same as queries)
+   * Make a GraphQL mutation.
+   * Uses /api/graphql/ for personal Facebook accounts (same endpoint as queries).
    */
   async mutation<T = unknown>(
     mutationName: string,
@@ -470,7 +628,7 @@ export class GraphQLClient {
   }
 
   /**
-   * Encode form data for POST request
+   * Encode form data as application/x-www-form-urlencoded string.
    */
   encodeFormData(data: Record<string, string>): string {
     return Object.entries(data)
@@ -483,7 +641,7 @@ export class GraphQLClient {
   }
 
   /**
-   * Build base form data
+   * Build base form data shared across query()/executeBatch().
    */
   private buildFormData(): Partial<FacebookFormData> {
     const data: Partial<FacebookFormData> = {
@@ -493,11 +651,9 @@ export class GraphQLClient {
       __ccg: 'EXCELLENT',
     };
 
-    // Real __rev (extractRevision()), never a fabricated placeholder like
-    // the old static "100" — see GraphQLClient.revision field docs. Only
-    // set here as a base default; query()/executeBatch() override it with
-    // the Comet __spin_r fingerprint when available (see payload ordering
-    // in those methods).
+    // Real __rev (extractRevision()), never a fabricated placeholder.
+    // Only set here as a base default; query()/executeBatch() override it
+    // with the real revision or Comet __spin_r fingerprint when available.
     if (this.revision) {
       data.__rev = this.revision;
     }
@@ -506,7 +662,8 @@ export class GraphQLClient {
   }
 
   /**
-   * Generate jazoest value
+   * Generate jazoest value — sum of fb_dtsg char codes prefixed with "2".
+   * This is how the real Messenger Web client computes it.
    */
   private generateJazoest(): string {
     let sum = 0;
@@ -517,7 +674,12 @@ export class GraphQLClient {
   }
 
   /**
-   * Generate __dyn parameter
+   * Generate __dyn parameter.
+   * This is a compressed representation of Facebook's lazy-loaded module
+   * graph for the current client build. The exact value rotates with each
+   * Facebook deploy. Facebook's servers are generally tolerant of a
+   * slightly-stale __dyn (it is a performance hint, not a security gate),
+   * but this should be updated whenever a new major Facebook web build ships.
    */
   private generateDyn(): string {
     return '7xeUmFoG3Ejy4QjG1mEhy4Q2qewKewSwMxu0SU1szU6U6O12wOx62G1uwJwpUe8hwaQ0z8cE7S0jq0Lk2K0vwbS1Lw9C0le0L83hw6aw8O0jq0wqo4C2m0jq78cE1JwqE2y0gq0N5o4aE3C0Do1swGwQwo8a8462xa';

@@ -50,6 +50,21 @@ export class Authenticator {
     // fingerprint) back into the same GraphQLClient instance every manager
     // shares, so periodic refresh doesn't leave callers using stale tokens.
     this.sessionManager.setGraphQLClient(this.graphqlClient);
+
+    // Wire a token provider so GraphQLClient always reads the latest
+    // fb_dtsg/userId/lsd directly from the active session before every
+    // request. This is an extra safety net on top of the push-based refresh
+    // above: even if a session refresh fires between a setAuthTokens() call
+    // and the actual HTTP request, the provider ensures the freshest tokens
+    // are used rather than a stale in-memory copy.
+    this.graphqlClient.setTokenProvider(() => {
+      const session = this.sessionManager.getSession();
+      return {
+        fbDtsg: session?.fbDtsg ?? '',
+        userId: session?.userId ?? '',
+        lsd: session?.lsd ?? '',
+      };
+    });
   }
 
   /**

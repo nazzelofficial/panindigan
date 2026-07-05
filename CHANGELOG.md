@@ -5,6 +5,30 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-07-05
+
+### Fixed
+
+#### GraphQL layer compatibility audit (`src/api/GraphQLClient.ts`, `src/types/api.ts`, `src/utils/Constants.ts`, `src/auth/Authenticator.ts`)
+
+- **`__rev` field was set to `this.spinR` (the spin-build revision) instead of `this.revision` (the plain numeric page revision)** — both `query()` and `executeBatch()` were assigning `__rev: this.spinR`. While `__spin_r` and `__rev` often share the same numeric value, they are semantically distinct: `__rev` is the plain page revision extracted via `extractRevision()`, and `__spin_r` is the Comet build fingerprint. Fixed to `__rev: this.revision || this.spinR` so the semantically correct value is preferred, with `spinR` as a fallback only when `revision` has not yet been extracted.
+
+- **Stale `fb_dtsg`/`lsd` copies could persist across session refresh cycles** — `GraphQLClient` stored tokens internally and had no mechanism to pull the latest values from `SessionManager` between refresh cycles. The push-based `setAuthTokens()` call on refresh was correct but left a gap: if a refresh fired between the last `setAuthTokens()` call and the next HTTP request, the outgoing request would still carry the old tokens. Fixed by introducing a `setTokenProvider(fn)` method that accepts a callback returning the latest `{ fbDtsg, userId, lsd }` from the live session; this callback is invoked at the top of every `formPost()`, `query()`, and `executeBatch()` call via the new `syncTokens()` helper. Wired up in `Authenticator`'s constructor to read directly from `SessionManager.getSession()`.
+
+- **Session-expiry errors surfaced as generic `GraphQLError` instead of `SessionExpiredError`** — Facebook responses may include structured session-expiry signals such as login_required, specific error codes, or error descriptions indicating an expired or invalid session. signals (`error: 1357001`, `login_required: true`, `errorDescription` containing "must be logged in" or "session expired") that were previously swallowed and re-thrown as opaque `GraphQLError` objects. Added `detectSessionExpiry()` private method, called at the response-parse stage in `formPost()`, `query()`, and `executeBatch()`. On match, it throws `SessionExpiredError` with full context (`url`, `operation`, `requestId`, parsed data payload), allowing callers to react precisely.
+
+- **Error logging lacked critical diagnostic context** — all three request methods (`formPost`, `query`, `executeBatch`) previously logged only `Object.keys(params)` or a bare error string on failure. Now each logs: HTTP status code, `x-fb-request-id` response header, operation name (for query/batch), URL, and the first 500 characters of the unparseable response body on JSON parse errors. Full Facebook error arrays (`data.errors`) are logged on GraphQL-level failures rather than only `errors[0].message`.
+
+- **`fb_api_req_friendly_name` missing from GraphQL query payloads** — `query()` now includes `fb_api_req_friendly_name: queryName` in the form body. Many GraphQL operations issued by the current Facebook web client include fb_api_req_friendly_name to identify the originating operation. to identify the originating operation on the server side; its absence is tolerated but its presence improves server-side diagnostic attribution.
+
+- **`GRAPHQL_DOC_IDS` and `GRAPHQL_QUERIES` were unused dead code** — both constants were exported from `src/utils/Constants.ts` but never imported or used anywhere in the library. Keeping them without a deprecation notice created a false impression that the library used registered doc_id-based queries; in reality all operations use form-encoded REST. Both are now marked `@deprecated` in their JSDoc to signal removal in a future major version without breaking the 1.3.x public API.
+
+- **`FacebookFormData` interface contained an `__hs` field that was never set** — the `__hs` field in `src/types/api.ts` was declared in the interface but no code path ever populated it. Removed to eliminate the phantom field. Added the missing `av`, `__spin_r`, `__spin_b`, `__spin_t`, and `fb_api_req_friendly_name` fields that are actually built and sent by `query()`/`executeBatch()`.
+
+- **`DEFAULT_USER_AGENT` was Chrome 126 (June 2024), now updated to Chrome 137** — updated `DEFAULT_USER_AGENT` in `src/utils/Constants.ts` from `Chrome/126.0.0.0` to `Chrome/137.0.0.0` and matched the `Sec-Ch-Ua` header accordingly (`"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"`). Updated the default User-Agent to better match current Chromium releases and reduce divergence from contemporary browser traffic.
+
+- **Stale comment in `mutation()` referenced the old `/webgraphql/query` endpoint** — updated to `/api/graphql/` to match the fix applied in 1.3.1.
+
 ## [1.3.1] - 2026-07-05
 
 ### Fixed

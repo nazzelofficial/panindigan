@@ -77,14 +77,18 @@ export interface FacebookFormData {
   __user: string;
   __a: string;
   __req: string;
-  __hs: string;
   dpr: string;
   __ccg: string;
   __rev: string;
   __s: string;
   __hsi: string;
+  __spin_r: string;
+  __spin_b: string;
+  __spin_t: string;
   __dyn: string;
   __csr: string;
   __comet_req: string;
+  av: string;
+  fb_api_req_friendly_name?: string;
   lsd?: string;
 }
