@@ -5,6 +5,22 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.7] - 2026-07-05
+
+### Audited
+
+#### MQTT CONNACK return code 3 ("Server unavailable") investigation
+Investigated a report of `MQTT connection refused / returnCode: 3 / Connection Refused - Server unavailable` on an AppState login that otherwise succeeds (session + HTTP requests work). Audited both MQTT clients (`src/mqtt/MQTTClient.ts`, `src/mqtt/FastMQTT.ts`) against all 20 requested protocol surfaces:
+
+- **WebSocket URL, protocol name/level, CONNECT flags, Remaining Length encoding, UTF-8 string encoding, username JSON payload shape, client ID / device ID / session ID generation, keep alive, clean session flag, QoS handling, WebSocket headers (User-Agent/Origin/Referer/Cookie), `Sec-WebSocket-Protocol` header, `aid`/`cp`/`ecp` fields — all verified already correct and already consistent between `MQTTClient.ts` and `FastMQTT.ts`** (protocol name `MQIsdp`, level 3, connect flags `0x82`, real username-present + clean-session bits, no fabricated password field, real device id always populated via `generateDeviceId()` fallback so the `d` field is never dropped by `JSON.stringify`).
+
+#### Fixed
+
+##### MQTT (`src/mqtt/MQTTClient.ts`)
+- **Un-encoded `cid`/`region` query params in `buildBrokerUrl()`** — `MQTTClient.ts` interpolated `this.clientId` and the region string directly into the WebSocket URL query string, while `FastMQTT.ts` correctly wrapped both in `encodeURIComponent()`. Not the cause of the reported return-code-3 (the generated client id/region values never contain characters requiring escaping today), but a real inconsistency between the two client implementations that could corrupt the URL if either value ever changes shape. Brought `MQTTClient.ts` in line with `FastMQTT.ts`.
+
+**Root cause of the return-code-3 report:** not found in the CONNECT packet encoding, WebSocket headers, or username payload — every field matches Facebook's real Messenger Web MQTT protocol as already documented in this codebase (see 1.2.5/1.2.6 CHANGELOG entries) and both client implementations are now byte-for-byte consistent. CONNACK return code 3 is returned by Facebook's broker itself (not a local encoding bug) when it refuses a structurally valid CONNECT — commonly caused by session/cookie state that is valid for HTTP but not (yet, or anymore) valid for the realtime edge (e.g. a very recently created AppState that hasn't propagated to the chat edge, an account already MQTT-connected from another live client, or a region edge outage) rather than by anything this library controls. No workaround, retry, or fabricated fix was introduced to mask this — the codebase does not guess or manufacture a "fix" for a broker-side refusal it cannot verify without a live packet capture from a failing account.
+
 ## [1.2.6] - 2026-07-04
 
 ### Added

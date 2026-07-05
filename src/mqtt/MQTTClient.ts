@@ -864,8 +864,8 @@ export class MQTTClient extends EventEmitter {
     // IMPORTANT: Do not use URLSearchParams as it truncates long user IDs
     const params = [
       `sid=${this.mqttSessionId}`,
-      `cid=${this.clientId}`,
-      `region=${(this.session.region || 'PRN').toLowerCase()}`,
+      `cid=${encodeURIComponent(this.clientId)}`,
+      `region=${encodeURIComponent((this.session.region || 'PRN').toLowerCase())}`,
     ];
     
     return `${baseUrl}?${params.join('&')}`;
