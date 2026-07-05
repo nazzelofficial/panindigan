@@ -96,9 +96,16 @@ export class FastMQTT extends EventEmitter {
         cookieCount: this.session.cookies.length,
       });
       
-      // The "mqtt" WebSocket subprotocol MUST be negotiated (Sec-WebSocket-Protocol)
-      // or Facebook's broker closes the raw socket before reading any MQTT packet.
-      this.ws = new WebSocket(brokerUrl, 'mqtt', {
+      // The "mqtt" WebSocket subprotocol header MUST be present on the
+      // upgrade request or Facebook's broker closes the raw socket before
+      // reading any MQTT packet.
+      //
+      // NOTE: sent as a raw `Sec-WebSocket-Protocol` header rather than via
+      // `ws`'s `protocols` constructor argument. `ws` enforces strict
+      // RFC6455 subprotocol negotiation for that argument and throws
+      // "Server sent no subprotocol" because Facebook's broker accepts the
+      // header but never echoes it back in its 101 response.
+      this.ws = new WebSocket(brokerUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Origin': 'https://www.facebook.com',
@@ -107,6 +114,7 @@ export class FastMQTT extends EventEmitter {
           'Cache-Control': 'no-cache',
           'Pragma': 'no-cache',
           'Referer': 'https://www.facebook.com/',
+          'Sec-WebSocket-Protocol': 'mqtt',
         },
         handshakeTimeout: this.connectionTimeout,
         perMessageDeflate: false,

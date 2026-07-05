@@ -175,6 +175,10 @@ export class PanindiganFCA extends EventEmitter {
       this.emit('error', error);
     });
 
+    this.mqttClient.on('mqtt_stats', (stats: ReturnType<MQTTClient['getConnectionStats']>) => {
+      this.emit('mqtt_stats', stats);
+    });
+
     await this.mqttClient.connect();
   }
 
@@ -1026,6 +1030,28 @@ export class PanindiganFCA extends EventEmitter {
    */
   getEntropyStats(): ReturnType<EntropyPool['getStats']> {
     return this.entropyPool.getStats();
+  }
+
+  /**
+   * MQTT connection diagnostics — connection/reconnect state, time since
+   * last packet, and queued message count. Returns null if the MQTT client
+   * hasn't been initialized yet (i.e. before `login()`/`connectMQTT()`).
+   */
+  getMQTTStats(): ReturnType<MQTTClient['getConnectionStats']> | null {
+    return this.mqttClient ? this.mqttClient.getConnectionStats() : null;
+  }
+
+  /**
+   * Resolve once MQTT is fully connected (CONNACK received), or reject
+   * after `timeoutMs` / on a connection error. Useful for callers that need
+   * to block until MQTT is actually ready before sending messages.
+   * Rejects immediately if MQTT hasn't been initialized yet.
+   */
+  waitForMQTTConnection(timeoutMs: number = 30000): Promise<void> {
+    if (!this.mqttClient) {
+      return Promise.reject(new Error('MQTT client not initialized — call login()/connectMQTT() first'));
+    }
+    return this.mqttClient.waitForConnection(timeoutMs);
   }
 
   // ==================== CALLS ====================

@@ -212,13 +212,17 @@ export class SessionManager {
               logger.info('Auto-refreshed fb_dtsg token');
             }
  
-            // Extract iris sequence ID if available (tries all known response formats)
+            // Extract iris sequence ID if available (tries all known response formats).
+            // The general homepage doesn't always carry this value (it normally
+            // lives in the Messenger inbox data blob) so a miss here is expected,
+            // not an error — MQTT falls back to a fresh sync queue instead of
+            // fabricating a sequence id.
             const extractedSeqId = extractIrisSeqId(html);
             if (extractedSeqId) {
               this.session.irisSeqId = extractedSeqId;
               logger.info('Auto-refreshed iris sequence ID');
             } else {
-              logger.warn('Could not extract iris sequence ID from refreshed HTML');
+              logger.debug('No iris sequence ID in refreshed homepage HTML; MQTT will use a fresh sync queue');
             }
           }
         } catch (tokenError) {

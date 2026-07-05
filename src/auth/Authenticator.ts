@@ -17,8 +17,8 @@ import { SessionManager } from './SessionManager.js';
 import { RequestHandler } from '../api/RequestHandler.js';
 import { GraphQLClient } from '../api/GraphQLClient.js';
 import { logger } from '../utils/Logger.js';
-import { FACEBOOK_BASE_URL, DEFAULT_USER_AGENT } from '../utils/Constants.js';
-import { extractFbDtsg, extractIrisSeqId } from '../utils/Helpers.js';
+import { FACEBOOK_BASE_URL, FACEBOOK_MESSAGES_URL, DEFAULT_USER_AGENT } from '../utils/Constants.js';
+import { extractFbDtsg, extractIrisSeqId, retryWithBackoff } from '../utils/Helpers.js';
 
 export class Authenticator {
   private sessionManager: SessionManager;
@@ -166,13 +166,52 @@ export class Authenticator {
         }
       }
 
-      // Extract iris sequence ID
-      const irisSeqId = extractIrisSeqId(html);
+      // Extract iris sequence ID. The general homepage does not always embed
+      // this value (it's normally populated from the Messenger inbox data
+      // blob, not www.facebook.com) so a miss here is expected/normal, not
+      // an error — MQTT handles it correctly by creating a fresh sync queue
+      // instead of fabricating a sequence id (see MQTTClient/FastMQTT
+      // sendSyncQueue()).
+      let irisSeqId = extractIrisSeqId(html);
       if (irisSeqId) {
         this.sessionManager.updateIrisSeqId(irisSeqId);
         logger.debug('Extracted iris sequence ID from homepage', { irisSeqId });
       } else {
-        logger.warn('Could not extract iris sequence ID from homepage - MQTT may use generated ID');
+        // Fall back to the Messenger inbox page, which actually carries the
+        // real Iris sync sequence id in its initial data blob. This lets a
+        // returning session resume its real backlog position via
+        // /messenger_sync_get_diffs instead of always starting a fresh
+        // sync queue. If this also fails, we still don't fabricate a value
+        // — MQTT just creates a fresh queue, which is correct behavior.
+        //
+        // Wrapped in a short retry/backoff (up to 3 attempts) so a single
+        // transient network hiccup doesn't silently skip this lookup — a
+        // non-2xx status is treated as a retryable failure here too, since
+        // it's most commonly a momentary blip rather than a real error.
+        try {
+          const messagesHtml = await retryWithBackoff(
+            async () => {
+              const messagesResponse = await this.requestHandler.get(FACEBOOK_MESSAGES_URL, { skipCache: true });
+              if (!messagesResponse.ok) {
+                throw new Error(`Messenger inbox fallback request failed with status ${messagesResponse.status}`);
+              }
+              return messagesResponse.text();
+            },
+            3,
+            500,
+            5000
+          );
+
+          irisSeqId = extractIrisSeqId(messagesHtml);
+          if (irisSeqId) {
+            this.sessionManager.updateIrisSeqId(irisSeqId);
+            logger.debug('Extracted iris sequence ID from Messenger inbox page', { irisSeqId });
+          } else {
+            logger.debug('No iris sequence ID in Messenger inbox response either; MQTT will start a fresh sync queue');
+          }
+        } catch (inboxError) {
+          logger.debug('Messenger inbox fallback for iris sequence ID failed after retries; MQTT will start a fresh sync queue', inboxError);
+        }
       }
 
     } catch (error) {

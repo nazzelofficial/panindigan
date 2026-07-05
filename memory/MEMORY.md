@@ -6,3 +6,5 @@
 - [MQTTClient topic sync](mqtt-topics.md) — subscribeToTopics() needs the full MQTT_TOPICS list; broker URL no longer carries topics (see mqtt-real-protocol.md)
 - [Logger logMessage directions](logger-directions.md) — logMessage() only accepts 'sent' | 'received'; use 'sent' for location/contact/forward sends
 - [Facebook MQTT real protocol](mqtt-real-protocol.md) — broker needs MQTT 3.1 ("MQIsdp") + JSON username payload + "mqtt" WS subprotocol, not bare 3.1.1
+- [Iris sequence id extraction](iris-seq-id-extraction.md) — value lives in Messenger inbox blob, not homepage; a homepage miss is expected, not an error
+- [MQTT reconnect pattern](mqtt-reconnect-pattern.md) — MQTTClient is the client actually wired into PanindiganFCA; keep its reconnect/health-check logic in sync with FastMQTT's

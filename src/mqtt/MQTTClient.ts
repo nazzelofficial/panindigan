@@ -27,8 +27,15 @@ export class MQTTClient extends EventEmitter {
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = Infinity;
   private reconnectDelay: number = 3000;
+  private maxReconnectDelay: number = 60000;
   private reconnectTimer?: NodeJS.Timeout;
   private keepAliveTimer?: NodeJS.Timeout;
+  private healthCheckTimer?: NodeJS.Timeout;
+  private healthCheckInterval: number = 30000;
+  private statsTimer?: NodeJS.Timeout;
+  private statsInterval: number = 30000;
+  private lastMessageTime: number = Date.now();
+  private isManuallyDisconnected: boolean = false;
   private lastPacketId: number = 0;
   private pendingAcks: Map<number, () => void> = new Map();
   private messageQueue: MQTTMessage[] = [];
@@ -58,6 +65,7 @@ export class MQTTClient extends EventEmitter {
     }
  
     this.connecting = true;
+    this.isManuallyDisconnected = false;
     logger.logMQTT('connecting', { clientId: this.clientId, userId: this.session.userId });
  
     try {
@@ -77,11 +85,20 @@ export class MQTTClient extends EventEmitter {
       
       // Create WebSocket connection.
       // IMPORTANT: Facebook's chat broker requires the "mqtt" WebSocket
-      // subprotocol to be negotiated via Sec-WebSocket-Protocol. Without it
+      // subprotocol header to be present on the upgrade request. Without it
       // the broker accepts the WS upgrade but then closes the raw socket
       // before ever reading the MQTT CONNECT packet — which is exactly the
       // "wsState: CLOSED" / connection-timeout symptom with no CONNACK.
-      this.ws = new WebSocket(brokerUrl, 'mqtt', {
+      //
+      // NOTE: we set this as a raw `Sec-WebSocket-Protocol` header instead of
+      // passing 'mqtt' as the `protocols` argument to `ws`'s WebSocket
+      // constructor. The `ws` library enforces strict RFC6455 subprotocol
+      // negotiation when protocols are passed that way — it throws
+      // "Server sent no subprotocol" if the server's 101 response doesn't
+      // echo the protocol back in its own Sec-WebSocket-Protocol header.
+      // Facebook's broker accepts the header but never echoes it, so strict
+      // negotiation must be bypassed by sending the header manually.
+      this.ws = new WebSocket(brokerUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Origin': 'https://www.facebook.com',
@@ -90,6 +107,7 @@ export class MQTTClient extends EventEmitter {
           'Cache-Control': 'no-cache',
           'Pragma': 'no-cache',
           'Referer': 'https://www.facebook.com/',
+          'Sec-WebSocket-Protocol': 'mqtt',
         },
         perMessageDeflate: false,
         timeout: this.connectionTimeout,
@@ -179,8 +197,11 @@ export class MQTTClient extends EventEmitter {
   disconnect(): void {
     logger.logMQTT('disconnecting');
     
+    this.isManuallyDisconnected = true;
     this.stopReconnect();
     this.stopKeepAlive();
+    this.stopHealthCheck();
+    this.stopStatsEmitter();
     
     if (this.ws) {
       // Send DISCONNECT packet
@@ -234,7 +255,87 @@ export class MQTTClient extends EventEmitter {
    * Check if connected
    */
   isConnected(): boolean {
-    return this.connected;
+    return this.connected && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Resolve once the client reaches a fully-connected state (CONNACK
+   * received, subscriptions sent), or reject after `timeoutMs` /
+   * on a connection error in the meantime. Useful for callers that need to
+   * block until MQTT is actually ready before sending messages, instead of
+   * relying on `publish()`'s message queue and hoping it flushes in time.
+   *
+   * If already connected, resolves immediately.
+   */
+  waitForConnection(timeoutMs: number = 30000): Promise<void> {
+    if (this.isConnected()) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off('connect', onConnect);
+        this.off('error', onError);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`Timed out waiting for MQTT connection after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const onConnect = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      const onError = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
+      this.once('connect', onConnect);
+      this.once('error', onError);
+    });
+  }
+
+  /**
+   * Get connection/reconnect stats — useful for callers that want to
+   * monitor connection health without hooking every internal event.
+   */
+  getConnectionStats(): {
+    connected: boolean;
+    connecting: boolean;
+    reconnectAttempts: number;
+    lastMessageTime: number;
+    timeSinceLastMessage: number;
+    messageQueueSize: number;
+    wsState: 'CONNECTING' | 'OPEN' | 'CLOSING' | 'CLOSED' | 'NONE';
+  } {
+    const stateNames: Record<number, 'CONNECTING' | 'OPEN' | 'CLOSING' | 'CLOSED'> = {
+      0: 'CONNECTING',
+      1: 'OPEN',
+      2: 'CLOSING',
+      3: 'CLOSED',
+    };
+
+    return {
+      connected: this.connected,
+      connecting: this.connecting,
+      reconnectAttempts: this.reconnectAttempts,
+      lastMessageTime: this.lastMessageTime,
+      timeSinceLastMessage: Date.now() - this.lastMessageTime,
+      messageQueueSize: this.messageQueue.length,
+      wsState: this.ws ? stateNames[this.ws.readyState] || 'CLOSED' : 'NONE',
+    };
   }
  
   /**
@@ -251,6 +352,8 @@ export class MQTTClient extends EventEmitter {
    * Handle incoming WebSocket message
    */
   private handleMessage(data: Buffer): void {
+    this.lastMessageTime = Date.now();
+
     try {
       // Parse MQTT packet
       const packet = this.parsePacket(data);
@@ -287,11 +390,14 @@ export class MQTTClient extends EventEmitter {
     
     this.connected = false;
     this.connecting = false;
+    this.stopKeepAlive();
+    this.stopHealthCheck();
+    this.stopStatsEmitter();
     
     this.emit('disconnect', { code, reason: reason.toString() });
     
-    // Attempt reconnection
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+    // Attempt reconnection unless the caller explicitly disconnected
+    if (!this.isManuallyDisconnected && this.reconnectAttempts < this.maxReconnectAttempts) {
       this.scheduleReconnect();
     }
   }
@@ -320,6 +426,12 @@ export class MQTTClient extends EventEmitter {
       
       // Start keep-alive
       this.startKeepAlive();
+
+      // Start stale-connection health check
+      this.startHealthCheck();
+
+      // Start periodic connection stats emission
+      this.startStatsEmitter();
       
       // Subscribe to required topics
       this.subscribeToTopics();
@@ -583,17 +695,124 @@ export class MQTTClient extends EventEmitter {
       this.keepAliveTimer = undefined;
     }
   }
+
+  /**
+   * Start the stale-connection health check. Facebook's broker can leave a
+   * WebSocket half-open (no close frame ever arrives) after a network
+   * hiccup on either side; PINGREQ/PINGRESP alone doesn't always surface
+   * that. This periodically checks how long it's been since any packet was
+   * received and forces a real reconnect if the connection looks dead,
+   * instead of silently sitting in a broken "connected" state.
+   */
+  private startHealthCheck(): void {
+    this.healthCheckTimer = setInterval(() => {
+      if (!this.connected) {
+        return;
+      }
+
+      const timeSinceLastMessage = Date.now() - this.lastMessageTime;
+      const keepAliveMs = MQTT_DEFAULT_OPTIONS.keepalive * 1000;
+
+      if (timeSinceLastMessage > keepAliveMs * 2) {
+        logger.warn('MQTT: no packets received recently, sending health-check ping', {
+          timeSinceLastMessage,
+        });
+        this.sendPing();
+      }
+
+      if (timeSinceLastMessage > keepAliveMs * 5) {
+        logger.error('MQTT: connection appears stale (no packets after repeated pings), forcing reconnect', {
+          timeSinceLastMessage,
+        });
+        this.forceReconnect();
+      }
+    }, this.healthCheckInterval);
+  }
+
+  /**
+   * Stop the stale-connection health check
+   */
+  private stopHealthCheck(): void {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = undefined;
+    }
+  }
+
+  /**
+   * Start periodically emitting an `mqtt_stats` event with the current
+   * `getConnectionStats()` snapshot, so consumers can subscribe to live
+   * connection health instead of having to poll manually.
+   */
+  private startStatsEmitter(): void {
+    if (this.statsTimer) {
+      return;
+    }
+    this.statsTimer = setInterval(() => {
+      this.emit('mqtt_stats', this.getConnectionStats());
+    }, this.statsInterval);
+  }
+
+  /**
+   * Stop the periodic `mqtt_stats` emitter
+   */
+  private stopStatsEmitter(): void {
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = undefined;
+    }
+  }
+
+  /**
+   * Force-close a stale connection and schedule a reconnect. Used only when
+   * the health check detects a dead connection that never emitted a real
+   * WebSocket 'close' event.
+   */
+  private forceReconnect(): void {
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.terminate();
+      this.ws = null;
+    }
+
+    this.connected = false;
+    this.connecting = false;
+    this.stopKeepAlive();
+    this.stopHealthCheck();
+    this.stopStatsEmitter();
+
+    this.emit('disconnect', { code: 0, reason: 'stale connection (health check)' });
+
+    if (!this.isManuallyDisconnected) {
+      this.scheduleReconnect();
+    }
+  }
  
   /**
-   * Schedule reconnection
+   * Schedule reconnection with exponential backoff + jitter.
+   *
+   * Facebook's MQTT broker can drop idle or flaky connections at any time;
+   * a real client (Messenger Web included) reconnects automatically rather
+   * than requiring a manual restart. Backoff grows exponentially (base
+   * delay doubling per attempt) up to `maxReconnectDelay`, with up to 30%
+   * random jitter so many reconnecting clients don't all retry in lockstep.
    */
   private scheduleReconnect(): void {
-    if (this.reconnectTimer) {
+    if (this.reconnectTimer || this.isManuallyDisconnected) {
+      return;
+    }
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      logger.error('MQTT: max reconnection attempts reached');
+      this.emit('max_reconnect_attempts_reached');
       return;
     }
     
     this.reconnectAttempts++;
-    const delay = Math.min(this.reconnectDelay * this.reconnectAttempts, 30000);
+    const rawDelay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    const cappedDelay = Math.min(rawDelay, this.maxReconnectDelay);
+    const jitter = Math.random() * 0.3 * cappedDelay;
+    const delay = Math.round(cappedDelay + jitter);
     
     logger.logMQTT('scheduling reconnect', { attempt: this.reconnectAttempts, delay });
     
