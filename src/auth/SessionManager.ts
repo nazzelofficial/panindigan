@@ -8,8 +8,8 @@ import { CookieJar } from 'tough-cookie';
 import type { Session, AppState, SessionValidationResult } from '../types/index.js';
 import { CookieParser } from './CookieParser.js';
 import { logger } from '../utils/Logger.js';
-import { generateDeviceId, generateUUID, extractIrisSeqId, extractRevisionInfo, extractRevision, extractLsd } from '../utils/Helpers.js';
-import { SESSION_SETTINGS, FACEBOOK_BASE_URL } from '../utils/Constants.js';
+import { generateDeviceId, generateUUID, extractIrisSeqId, extractRevisionInfo, extractRevision, extractLsd, extractFbDtsg, retryWithBackoff } from '../utils/Helpers.js';
+import { SESSION_SETTINGS, FACEBOOK_BASE_URL, FACEBOOK_MESSAGES_URL } from '../utils/Constants.js';
 import type { RequestHandler } from '../api/RequestHandler.js';
 import type { GraphQLClient } from '../api/GraphQLClient.js';
  
@@ -256,14 +256,26 @@ export class SessionManager {
       if (!this.requestHandler) {
         logger.warn('No RequestHandler set on SessionManager — skipping token refresh. Call setRequestHandler() after construction.');
       } else {
+        // Capture a local reference so TypeScript can narrow the type through
+        // async callbacks (this.requestHandler can't be narrowed by TS after
+        // the if (!this.requestHandler) check above).
+        const requestHandler = this.requestHandler;
         try {
-          const response = await this.requestHandler.get(FACEBOOK_BASE_URL);
- 
+          const response = await requestHandler.get(FACEBOOK_BASE_URL);
+
+          // Hoist token variables so the Messenger inbox fallback can check
+          // and fill them whether the homepage returned 2xx or not.
+          let lsd: string | null = null;
+          let revisionInfo: { spinR: string; spinB: string; spinT: string; hsi: string } | null = null;
+          let revision: string | null = null;
+          let extractedSeqId: string | null = null;
+
           if (response.ok) {
             const html = await response.text();
-            const fbDtsgMatch = html.match(/"DTSGInitialData",\s*\[\],\s*{"token":"([^"]+)"/);
-            if (fbDtsgMatch && fbDtsgMatch[1]) {
-              this.session.fbDtsg = fbDtsgMatch[1];
+
+            const fbDtsg = extractFbDtsg(html);
+            if (fbDtsg) {
+              this.session.fbDtsg = fbDtsg;
               logger.info('Auto-refreshed fb_dtsg token');
             }
 
@@ -277,13 +289,13 @@ export class SessionManager {
             // Facebook embeds lsd as a Haste module bootstrap tuple
             // (`["LSD",[],{"token":"..."}]`), not a plain `"lsd":"..."` JSON
             // key — see extractLsd() in Helpers.ts for the full root cause.
-            const lsd = extractLsd(html);
+            lsd = extractLsd(html);
             if (lsd) {
               this.session.lsd = lsd;
-              this.requestHandler.setLsdToken(lsd);
+              requestHandler.setLsdToken(lsd);
               logger.info('Auto-refreshed lsd token');
             } else {
-              logger.warn('Could not extract lsd token during session refresh; GraphQL requests may be rejected until the next successful refresh');
+              logger.debug('lsd not found on homepage during session refresh; will try Messenger inbox fallback');
             }
 
             // Auto-refresh the real Facebook build/revision fingerprint
@@ -291,12 +303,12 @@ export class SessionManager {
             // Facebook deploy, so a value captured at login will eventually
             // go stale and start being rejected the same way an expired
             // fb_dtsg/lsd would be.
-            const revisionInfo = extractRevisionInfo(html);
+            revisionInfo = extractRevisionInfo(html);
             if (revisionInfo) {
               this.session.revisionInfo = revisionInfo;
               logger.info('Auto-refreshed Facebook build/revision fingerprint');
             } else {
-              logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi during session refresh; GraphQL query()/batchQuery() may be rejected until the next successful refresh');
+              logger.debug('Revision fingerprint not found on homepage during session refresh; will try Messenger inbox fallback');
             }
 
             // Auto-refresh the plain numeric page revision (__rev) — a
@@ -305,7 +317,7 @@ export class SessionManager {
             // (fca-unofficial, ws3-fca) send this on every legacy
             // form-encoded request (e.g. /chat/user_info/, used by
             // getUserInfo) independent of the Comet fingerprint.
-            const revision = extractRevision(html);
+            revision = extractRevision(html);
             if (revision) {
               logger.info('Auto-refreshed real Facebook page revision (__rev)');
             }
@@ -323,18 +335,90 @@ export class SessionManager {
                 this.graphqlClient.setRevision(revision);
               }
             }
- 
+
             // Extract iris sequence ID if available (tries all known response formats).
             // The general homepage doesn't always carry this value (it normally
             // lives in the Messenger inbox data blob) so a miss here is expected,
             // not an error — MQTT falls back to a fresh sync queue instead of
             // fabricating a sequence id.
-            const extractedSeqId = extractIrisSeqId(html);
+            extractedSeqId = extractIrisSeqId(html);
             if (extractedSeqId) {
               this.session.irisSeqId = extractedSeqId;
               logger.info('Auto-refreshed iris sequence ID');
             } else {
               logger.debug('No iris sequence ID in refreshed homepage HTML; MQTT will use a fresh sync queue');
+            }
+          } else {
+            logger.debug(`Homepage returned ${response.status} during session refresh; skipping homepage extraction and trying Messenger inbox fallback`);
+          }
+
+          // If any critical token is still missing — whether because the
+          // homepage returned non-2xx or because it served a stripped shell
+          // (CDN edge cache, A/B cohort, consent interstitial) that omitted
+          // the Haste bootstrap blob — fall back to the Messenger inbox page.
+          // /messages/t/ is a full Comet page load that reliably re-embeds
+          // LSD/__spin_*/__hsi and the Iris sync data.
+          if (!lsd || !revisionInfo || !revision || !extractedSeqId) {
+            try {
+              const messagesHtml = await retryWithBackoff(
+                async () => {
+                  const messagesResponse = await requestHandler.get(FACEBOOK_MESSAGES_URL, { skipCache: true });
+                  if (!messagesResponse.ok) {
+                    throw new Error(`Messenger inbox fallback failed with status ${messagesResponse.status}`);
+                  }
+                  return messagesResponse.text();
+                },
+                3,
+                500,
+                5000
+              );
+
+              if (!lsd) {
+                const inboxLsd = extractLsd(messagesHtml);
+                if (inboxLsd) {
+                  this.session.lsd = inboxLsd;
+                  requestHandler.setLsdToken(inboxLsd);
+                  if (this.graphqlClient) {
+                    this.graphqlClient.setAuthTokens(this.session.fbDtsg, this.session.userId, inboxLsd);
+                  }
+                  logger.info('Auto-refreshed lsd token from Messenger inbox');
+                } else {
+                  logger.warn('Could not extract lsd token during session refresh; GraphQL requests may be rejected until the next successful refresh');
+                }
+              }
+
+              if (!revisionInfo) {
+                const inboxRevisionInfo = extractRevisionInfo(messagesHtml);
+                if (inboxRevisionInfo) {
+                  this.session.revisionInfo = inboxRevisionInfo;
+                  if (this.graphqlClient) {
+                    this.graphqlClient.setRevisionInfo(inboxRevisionInfo);
+                  }
+                  logger.info('Auto-refreshed Facebook build/revision fingerprint from Messenger inbox');
+                } else {
+                  logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi during session refresh; GraphQL query()/batchQuery() may be rejected until the next successful refresh');
+                }
+              }
+
+              if (!revision) {
+                const inboxRevision = extractRevision(messagesHtml);
+                if (inboxRevision) {
+                  if (this.graphqlClient) {
+                    this.graphqlClient.setRevision(inboxRevision);
+                  }
+                  logger.info('Auto-refreshed real Facebook page revision (__rev) from Messenger inbox');
+                }
+              }
+
+              if (!extractedSeqId) {
+                const inboxSeqId = extractIrisSeqId(messagesHtml);
+                if (inboxSeqId) {
+                  this.session.irisSeqId = inboxSeqId;
+                  logger.info('Auto-refreshed iris sequence ID from Messenger inbox');
+                }
+              }
+            } catch (inboxError) {
+              logger.debug('Messenger inbox fallback during session refresh failed', inboxError);
             }
           }
         } catch (tokenError) {

@@ -4,8 +4,8 @@
 
 export const FACEBOOK_BASE_URL = 'https://www.facebook.com';
 export const FACEBOOK_MESSAGES_URL = 'https://www.facebook.com/messages/t/';
-export const FACEBOOK_WEBGRAPHQL_URL = 'https://www.facebook.com/webgraphql/query';
-export const FACEBOOK_BATCH_URL = 'https://www.facebook.com/webgraphqlbatch';
+export const FACEBOOK_WEBGRAPHQL_URL = 'https://www.facebook.com/api/graphql/';
+export const FACEBOOK_BATCH_URL = 'https://www.facebook.com/api/graphqlbatch/';
 export const FACEBOOK_UPLOAD_URL = 'https://upload.facebook.com/ajax/mercury/upload.php';
 
 // Messenger REST endpoints (stable form-encoded POST endpoints)

@@ -161,14 +161,13 @@ export class Authenticator {
 
       const html = await response.text();
       
-      // Extract fb_dtsg if not present
-      if (!session.fbDtsg) {
-        const fbDtsg = extractFbDtsg(html);
-        if (fbDtsg) {
-          this.sessionManager.updateFbDtsg(fbDtsg);
-          this.graphqlClient.setAuthTokens(fbDtsg, session.userId, this.sessionManager.getLsd() || undefined);
-          logger.debug('Extracted fb_dtsg from homepage');
-        }
+      // Always refresh fb_dtsg from the live homepage — it rotates and the
+      // AppState value may already be stale by the time loginWithAppState() runs.
+      const fbDtsg = extractFbDtsg(html);
+      if (fbDtsg) {
+        this.sessionManager.updateFbDtsg(fbDtsg);
+        this.graphqlClient.setAuthTokens(fbDtsg, session.userId, this.sessionManager.getLsd() || undefined);
+        logger.debug('Refreshed fb_dtsg from homepage');
       }
 
       // Extract the real lsd token — a separate, page-load-bound Facebook
@@ -180,15 +179,19 @@ export class Authenticator {
       // Facebook embeds lsd as a Haste module bootstrap tuple
       // (`["LSD",[],{"token":"..."}]`), not a plain `"lsd":"..."` JSON key —
       // see extractLsd() in Helpers.ts for the full root-cause writeup.
+      // Fresh lsd from the live homepage always takes priority over the
+      // stale AppState value — using a stale lsd is what causes the
+      // "Please try closing and re-opening your browser window" error.
+      // Fall back to session.lsd only when the homepage yielded nothing.
       let lsd = extractLsd(html);
-      if (session.lsd) {
-        this.requestHandler.setLsdToken(session.lsd);
-        lsd = session.lsd;
-      } else if (lsd) {
+      if (lsd) {
         this.sessionManager.updateLsd(lsd);
         this.requestHandler.setLsdToken(lsd);
         this.graphqlClient.setAuthTokens(this.sessionManager.getFbDtsg() || session.fbDtsg, session.userId, lsd);
         logger.debug('Extracted lsd token from homepage');
+      } else if (session.lsd) {
+        lsd = session.lsd;
+        this.requestHandler.setLsdToken(session.lsd);
       }
 
       // Extract the real Facebook build/revision fingerprint

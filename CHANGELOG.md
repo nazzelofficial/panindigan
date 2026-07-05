@@ -5,6 +5,27 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-05
+
+### Fixed
+
+#### GraphQL endpoint URLs (`src/utils/Constants.ts`)
+- **`FACEBOOK_WEBGRAPHQL_URL` was pointing to `/webgraphql/query`** — updated to `/api/graphql/`, which is the GraphQL endpoint used by the current Facebook web client. The previous endpoint could lead to unexpected responses or request failures.
+- **`FACEBOOK_BATCH_URL` was pointing to `/webgraphqlbatch`** — updated to `/api/graphqlbatch/`, matching the batch GraphQL endpoint used by current Facebook web traffic and modern FCA implementations.
+
+#### Session refresh missing Messenger inbox fallback (`src/auth/SessionManager.ts`)
+- **`refreshSession()` had no fallback for stripped homepage responses** — unlike `loginWithAppState()` (fixed in 1.3.0), the periodic `refreshSession()` call never fell back to the Messenger inbox page when the homepage served a stripped shell (CDN edge cache, A/B cohort, consent interstitial) that omitted the Haste bootstrap blob. This was the root cause of the recurring `Could not extract lsd token during session refresh` and `Could not extract __spin_r/__spin_b/__spin_t/__hsi during session refresh` warnings in production logs even after 1.3.0.
+  - Fix: `refreshSession()` now mirrors `loginWithAppState()` exactly — if `lsd`, the revision fingerprint, `__rev`, or the iris sequence id are still missing after the homepage fetch, it falls back to `/messages/t/` with the same `retryWithBackoff(3, 500, 5000)` retry policy. Warnings are only emitted if both the homepage and the inbox page fail to yield the token.
+- **`refreshSession()` used an inline single-pattern regex for `fb_dtsg`** — replaced with the `extractFbDtsg()` helper (which tries multiple known Facebook HTML patterns) for consistency and robustness.
+
+#### lsd priority in `loginWithAppState()` (`src/auth/Authenticator.ts`)
+- **Stale AppState `lsd` silently overrode freshly extracted `lsd` from homepage** — when the AppState contained an `lsd` value, `loginWithAppState()` used it unconditionally and discarded the fresh lsd extracted from the live homepage HTML. Since `lsd` is a page-load-bound token that Facebook issues per-request, using an older AppState value instead of the freshly issued one was causing `GraphQLError: Please try closing and re-opening your browser window` on first use.
+  - Fix: fresh lsd from the homepage always takes priority; session.lsd is now only used as a fallback if the homepage yields nothing.
+
+#### fb_dtsg not refreshed when AppState already contained it (`src/auth/Authenticator.ts`)
+- **`if (!session.fbDtsg)` guard prevented `fb_dtsg` from ever being refreshed from the homepage** — if the AppState carried an `fb_dtsg` value (the common case), `loginWithAppState()` never re-extracted it from the live page, so a rotated token would persist unchecked until it expired and caused failures.
+  - Fix: removed the `if (!session.fbDtsg)` guard; `fb_dtsg` is now always re-extracted from the live homepage on every `loginWithAppState()` call, with the AppState value serving as an initial seed only.
+
 ## [1.3.0] - 2026-07-05
 
 ### Fixed
