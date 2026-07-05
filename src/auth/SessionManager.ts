@@ -8,9 +8,10 @@ import { CookieJar } from 'tough-cookie';
 import type { Session, AppState, SessionValidationResult } from '../types/index.js';
 import { CookieParser } from './CookieParser.js';
 import { logger } from '../utils/Logger.js';
-import { generateDeviceId, generateUUID, extractIrisSeqId } from '../utils/Helpers.js';
+import { generateDeviceId, generateUUID, extractIrisSeqId, extractRevisionInfo } from '../utils/Helpers.js';
 import { SESSION_SETTINGS, FACEBOOK_BASE_URL } from '../utils/Constants.js';
 import type { RequestHandler } from '../api/RequestHandler.js';
+import type { GraphQLClient } from '../api/GraphQLClient.js';
  
 export class SessionManager {
   private session: Session | null = null;
@@ -19,6 +20,7 @@ export class SessionManager {
   private refreshInterval?: NodeJS.Timeout;
   private validationInterval?: NodeJS.Timeout;
   private requestHandler?: RequestHandler;
+  private graphqlClient?: GraphQLClient;
  
   constructor(cookieJar: CookieJar, sessionPath?: string) {
     this.cookieJar = cookieJar;
@@ -31,6 +33,16 @@ export class SessionManager {
    */
   setRequestHandler(handler: RequestHandler): void {
     this.requestHandler = handler;
+  }
+
+  /**
+   * Inject the GraphQLClient so refreshSession() can push refreshed
+   * fb_dtsg/lsd/revision-fingerprint tokens back into it — without this,
+   * a periodic refresh would update the Session object but leave the
+   * client issuing requests with stale (eventually rejected) tokens.
+   */
+  setGraphQLClient(client: GraphQLClient): void {
+    this.graphqlClient = client;
   }
  
   /**
@@ -147,6 +159,25 @@ export class SessionManager {
   }
 
   /**
+   * Update the real Facebook build/revision fingerprint
+   * (__spin_r/__spin_b/__spin_t + __hsi). Must always come from live HTML
+   * extraction (see `extractRevisionInfo`) — never a fabricated value.
+   */
+  updateRevisionInfo(info: { spinR: string; spinB: string; spinT: string; hsi: string }): void {
+    if (this.session) {
+      this.session.revisionInfo = info;
+      this.session.lastActive = new Date();
+    }
+  }
+
+  /**
+   * Get the current real revision fingerprint, if one has been extracted.
+   */
+  getRevisionInfo(): Session['revisionInfo'] {
+    return this.session?.revisionInfo;
+  }
+
+  /**
    * Update iris sequence ID
    */
   updateIrisSeqId(seqId: string): void {
@@ -249,6 +280,30 @@ export class SessionManager {
               logger.info('Auto-refreshed lsd token');
             } else {
               logger.warn('Could not extract lsd token during session refresh; GraphQL requests may be rejected until the next successful refresh');
+            }
+
+            // Auto-refresh the real Facebook build/revision fingerprint
+            // (__spin_r/__spin_b/__spin_t + __hsi) — it rotates with every
+            // Facebook deploy, so a value captured at login will eventually
+            // go stale and start being rejected the same way an expired
+            // fb_dtsg/lsd would be.
+            const revisionInfo = extractRevisionInfo(html);
+            if (revisionInfo) {
+              this.session.revisionInfo = revisionInfo;
+              logger.info('Auto-refreshed Facebook build/revision fingerprint');
+            } else {
+              logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi during session refresh; GraphQL query()/batchQuery() may be rejected until the next successful refresh');
+            }
+
+            // Push all refreshed tokens back into the live GraphQLClient —
+            // without this, the Session object updates but every in-flight
+            // manager keeps issuing requests with the old (soon-to-expire)
+            // tokens.
+            if (this.graphqlClient) {
+              this.graphqlClient.setAuthTokens(this.session.fbDtsg, this.session.userId, this.session.lsd);
+              if (revisionInfo) {
+                this.graphqlClient.setRevisionInfo(revisionInfo);
+              }
             }
  
             // Extract iris sequence ID if available (tries all known response formats).

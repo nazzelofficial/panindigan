@@ -144,6 +144,41 @@ export function extractUserId(html: string): string | null {
 }
 
 /**
+ * Extract Facebook's real build/revision fingerprint from live page HTML.
+ *
+ * Comet-era Facebook validates `__spin_r`/`__spin_b`/`__spin_t` (and the
+ * haste session id `__hsi`) on ajax/GraphQL POSTs against the values the
+ * server itself just served in the page. These must come from the actual
+ * HTML — a fabricated/hardcoded `__rev` (e.g. a static "100") or a randomly
+ * generated `__hsi` is exactly what triggers Facebook's generic
+ * "Please try closing and re-opening your browser window." rejection.
+ * Returns null if any required piece can't be found (never fills in a
+ * fake value).
+ */
+export function extractRevisionInfo(html: string): {
+  spinR: string;
+  spinB: string;
+  spinT: string;
+  hsi: string;
+} | null {
+  const spinRMatch = html.match(/"__spin_r":(\d+)/);
+  const spinBMatch = html.match(/"__spin_b":"([^"]+)"/);
+  const spinTMatch = html.match(/"__spin_t":(\d+)/);
+  const hsiMatch = html.match(/"__hsi":"(\d+)"/) || html.match(/"hsi":"(\d+)"/);
+
+  if (!spinRMatch || !spinBMatch || !spinTMatch || !hsiMatch) {
+    return null;
+  }
+
+  return {
+    spinR: spinRMatch[1],
+    spinB: spinBMatch[1],
+    spinT: spinTMatch[1],
+    hsi: hsiMatch[1],
+  };
+}
+
+/**
  * Extract iris sequence ID from HTML
  */
 export function extractIrisSeqId(html: string): string | null {

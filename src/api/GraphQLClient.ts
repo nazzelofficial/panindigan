@@ -26,8 +26,38 @@ export class GraphQLClient {
   private lsd: string = '';
   private checkpointGuard?: CheckpointGuard;
 
+  /**
+   * Real Facebook build/revision fingerprint (`__spin_r`/`__spin_b`/`__spin_t`
+   * and the haste session id `__hsi`), extracted from live page HTML by
+   * Authenticator/SessionManager. Comet-era ajax/GraphQL endpoints validate
+   * these against the session — a hardcoded/fake value (e.g. a static
+   * `__rev: '100'`) is rejected with "Please try closing and re-opening your
+   * browser window." Until a real value has been extracted, these stay
+   * empty rather than falling back to a fabricated default.
+   */
+  private spinR: string = '';
+  private spinB: string = '';
+  private spinT: string = '';
+  private hsi: string = '';
+
   constructor(requestHandler: RequestHandler) {
     this.requestHandler = requestHandler;
+  }
+
+  /**
+   * Set the real Facebook build/revision fingerprint extracted from page
+   * HTML. Must never be called with fabricated values — see field docs.
+   */
+  setRevisionInfo(info: { spinR: string; spinB: string; spinT: string; hsi: string }): void {
+    this.spinR = info.spinR;
+    this.spinB = info.spinB;
+    this.spinT = info.spinT;
+    this.hsi = info.hsi;
+  }
+
+  /** Whether a real revision fingerprint has been extracted yet. */
+  hasRevisionInfo(): boolean {
+    return !!(this.spinR && this.spinB && this.spinT && this.hsi);
   }
 
   /**
@@ -69,7 +99,7 @@ export class GraphQLClient {
    * Build the standard base parameters used in all Facebook form requests.
    */
   buildBaseParams(): Record<string, string> {
-    return {
+    const params: Record<string, string> = {
       fb_dtsg: this.fbDtsg,
       lsd: this.lsd,
       __a: '1',
@@ -77,6 +107,19 @@ export class GraphQLClient {
       __req: generateReqParam(),
       jazoest: this.generateJazoest(),
     };
+
+    // Only attach the real build/revision fingerprint once it has actually
+    // been extracted from live HTML (see setRevisionInfo docs) — never a
+    // fabricated placeholder.
+    if (this.hasRevisionInfo()) {
+      params.__rev = this.spinR;
+      params.__spin_r = this.spinR;
+      params.__spin_b = this.spinB;
+      params.__spin_t = this.spinT;
+      params.__hsi = this.hsi;
+    }
+
+    return params;
   }
 
   /**
@@ -142,6 +185,15 @@ export class GraphQLClient {
   ): Promise<T> {
     const formData = this.buildFormData();
 
+    if (!this.hasRevisionInfo()) {
+      throw this.createGraphQLError(
+        ERROR_CODES.GRAPHQL_ERROR,
+        'Cannot issue GraphQL query: real Facebook __spin_r/__spin_b/__spin_t/__hsi have not been extracted yet. ' +
+          'This requires a successful homepage fetch during login/session refresh — retry after login completes.',
+        0
+      );
+    }
+
     const payload: Record<string, string> = {
       av: this.userId,
       __user: this.userId,
@@ -149,9 +201,12 @@ export class GraphQLClient {
       __req: generateReqParam(),
       dpr: '1',
       __ccg: 'EXCELLENT',
-      __rev: '100',
+      __rev: this.spinR,
+      __spin_r: this.spinR,
+      __spin_b: this.spinB,
+      __spin_t: this.spinT,
       __s: generateRandomString(6),
-      __hsi: generateRandomString(12),
+      __hsi: this.hsi,
       __dyn: this.generateDyn(),
       __csr: '',
       __comet_req: '0',
@@ -265,6 +320,15 @@ export class GraphQLClient {
   private async executeBatch(batch: BatchRequest): Promise<BatchResponse> {
     const formData = this.buildFormData();
 
+    if (!this.hasRevisionInfo()) {
+      throw this.createGraphQLError(
+        ERROR_CODES.GRAPHQL_ERROR,
+        'Cannot issue GraphQL batch query: real Facebook __spin_r/__spin_b/__spin_t/__hsi have not been extracted yet. ' +
+          'This requires a successful homepage fetch during login/session refresh — retry after login completes.',
+        0
+      );
+    }
+
     const payload: Record<string, string> = {
       av: this.userId,
       __user: this.userId,
@@ -272,9 +336,12 @@ export class GraphQLClient {
       __req: generateReqParam(),
       dpr: '1',
       __ccg: 'EXCELLENT',
-      __rev: '100',
+      __rev: this.spinR,
+      __spin_r: this.spinR,
+      __spin_b: this.spinB,
+      __spin_t: this.spinT,
       __s: generateRandomString(6),
-      __hsi: generateRandomString(12),
+      __hsi: this.hsi,
       __dyn: this.generateDyn(),
       __csr: '',
       __comet_req: '7',

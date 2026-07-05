@@ -18,7 +18,7 @@ import { RequestHandler } from '../api/RequestHandler.js';
 import { GraphQLClient } from '../api/GraphQLClient.js';
 import { logger } from '../utils/Logger.js';
 import { FACEBOOK_BASE_URL, FACEBOOK_MESSAGES_URL, DEFAULT_USER_AGENT } from '../utils/Constants.js';
-import { extractFbDtsg, extractIrisSeqId, retryWithBackoff } from '../utils/Helpers.js';
+import { extractFbDtsg, extractIrisSeqId, extractRevisionInfo, retryWithBackoff } from '../utils/Helpers.js';
 
 export class Authenticator {
   private sessionManager: SessionManager;
@@ -45,6 +45,11 @@ export class Authenticator {
     
     // Initialize GraphQL client
     this.graphqlClient = new GraphQLClient(this.requestHandler);
+
+    // Let the SessionManager push refreshed tokens (fb_dtsg/lsd/revision
+    // fingerprint) back into the same GraphQLClient instance every manager
+    // shares, so periodic refresh doesn't leave callers using stale tokens.
+    this.sessionManager.setGraphQLClient(this.graphqlClient);
   }
 
   /**
@@ -184,6 +189,21 @@ export class Authenticator {
         }
       } else {
         this.requestHandler.setLsdToken(session.lsd);
+      }
+
+      // Extract the real Facebook build/revision fingerprint
+      // (__spin_r/__spin_b/__spin_t + __hsi). Comet-era ajax/GraphQL
+      // endpoints reject requests carrying a fabricated/hardcoded __rev or
+      // a randomly generated __hsi with the same generic
+      // "Please try closing and re-opening your browser window." error —
+      // these values must always come from the HTML Facebook just served.
+      const revisionInfo = extractRevisionInfo(html);
+      if (revisionInfo) {
+        this.sessionManager.updateRevisionInfo(revisionInfo);
+        this.graphqlClient.setRevisionInfo(revisionInfo);
+        logger.debug('Extracted real Facebook build/revision fingerprint', revisionInfo);
+      } else {
+        logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi from homepage; GraphQL query()/batchQuery() will be rejected until a valid fingerprint is obtained (formPost-based calls still work once fb_dtsg/lsd are set)');
       }
 
       // Extract iris sequence ID. The general homepage does not always embed

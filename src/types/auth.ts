@@ -44,6 +44,26 @@ export interface Session {
   loggedIn: boolean;
   createdAt: Date;
   lastActive: Date;
+  /**
+   * Real Facebook build/revision fingerprint, extracted from the live page
+   * HTML (`__spin_r`/`__spin_b`/`__spin_t`, plus the haste session id
+   * `__hsi`). These are never fabricated — Facebook's Comet-era ajax and
+   * GraphQL endpoints cross-validate them against the session and reject
+   * mismatched/fake values with "Please try closing and re-opening your
+   * browser window."
+   */
+  revisionInfo?: RevisionInfo;
+}
+
+export interface RevisionInfo {
+  /** `__spin_r` — numeric server revision id */
+  spinR: string;
+  /** `__spin_b` — build branch (e.g. "trunk") */
+  spinB: string;
+  /** `__spin_t` — build timestamp (unix seconds) */
+  spinT: string;
+  /** `__hsi` — haste session id, scoped to the current page load */
+  hsi: string;
 }
 
 export interface TwoFactorAuth {

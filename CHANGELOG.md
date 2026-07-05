@@ -5,6 +5,17 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.9] - 2026-07-05
+
+### Fixed
+
+#### GraphQL (`src/api/GraphQLClient.ts`, `src/auth/Authenticator.ts`, `src/auth/SessionManager.ts`, `src/utils/Helpers.ts`, `src/types/auth.ts`)
+- **Root cause of the remaining `GraphQLError: Please try closing and re-opening your browser window` on `GraphQLClient.query()`/`executeBatch()` (and, by extension, `UserManager.getUserInfo()` when routed through them)** — after 1.2.8 fixed the missing/fabricated `lsd` token, requests were still being rejected because `query()`/`executeBatch()` sent a **hardcoded, fake build/revision fingerprint**: `__rev: '100'` (a static string, not a real Facebook server revision) and `__hsi: generateRandomString(12)` (a random value, not the real haste session id Facebook issued for that page load). Facebook's Comet-era ajax/GraphQL endpoints cross-validate `__rev`/`__spin_r`/`__spin_b`/`__spin_t`/`__hsi` against the session and reject any request whose fingerprint doesn't match a value it actually served — a fabricated or stale fingerprint produces the exact same generic browser-session error as a missing `lsd`.
+  - Fix: added `extractRevisionInfo()` (`src/utils/Helpers.ts`), which extracts the real `__spin_r`, `__spin_b`, `__spin_t`, and `__hsi` values straight out of the Facebook HTML returned on login (`Authenticator.loginWithAppState`) and on every periodic session refresh (`SessionManager.refreshSession`). These are stored on `Session.revisionInfo` (new field, `src/types/auth.ts`) and pushed into `GraphQLClient.setRevisionInfo()`, which now supplies the real values to `buildBaseParams()` (used by `formPost()`/`UserManager.getUserInfo`), `query()`, and `executeBatch()` — replacing the hardcoded `__rev: '100'` and randomly generated `__hsi` entirely.
+  - `GraphQLClient.query()`/`executeBatch()` now throw a clear, typed `GraphQLError` up front if a real fingerprint hasn't been extracted yet, instead of silently sending a fabricated one and letting Facebook reject it downstream with a misleading message.
+  - `SessionManager` now also holds a reference to the shared `GraphQLClient` (`setGraphQLClient()`, wired up in `Authenticator`'s constructor) so that refreshed `fb_dtsg`/`lsd`/revision-fingerprint values are pushed back into the same client instance every manager (`UserManager`, `MessageSender`, `ThreadManager`, `MediaUploader`) already shares — previously a periodic refresh updated the `Session` object but left the live `GraphQLClient` using the original, aging tokens indefinitely.
+  - No retries, delays, or workarounds were added. No fake user data, no placeholder GraphQL responses, and no changes to MQTT. The fix is exactly what the audit called for: extract the real per-page build/revision fingerprint Facebook already serves and stop sending a static/random substitute.
+
 ## [1.2.8] - 2026-07-05
 
 ### Fixed

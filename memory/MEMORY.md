@@ -9,3 +9,4 @@
 - [Iris sequence id extraction](iris-seq-id-extraction.md) — value lives in Messenger inbox blob, not homepage; a homepage miss is expected, not an error
 - [MQTT reconnect pattern](mqtt-reconnect-pattern.md) — MQTTClient is the client actually wired into PanindiganFCA; keep its reconnect/health-check logic in sync with FastMQTT's
 - [Facebook lsd token vs fb_dtsg](facebook-lsd-token.md) — real lsd token must be extracted/reused like fb_dtsg, never faked/omitted, or GraphQL calls get rejected
+- [Facebook revision fingerprint](facebook-revision-fingerprint.md) — __rev/__spin_r/__spin_b/__spin_t/__hsi must be extracted from real HTML like fb_dtsg/lsd, never hardcoded/random
