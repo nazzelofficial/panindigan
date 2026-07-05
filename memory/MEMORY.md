@@ -8,3 +8,4 @@
 - [Facebook MQTT real protocol](mqtt-real-protocol.md) — broker needs MQTT 3.1 ("MQIsdp") + JSON username payload + "mqtt" WS subprotocol, not bare 3.1.1
 - [Iris sequence id extraction](iris-seq-id-extraction.md) — value lives in Messenger inbox blob, not homepage; a homepage miss is expected, not an error
 - [MQTT reconnect pattern](mqtt-reconnect-pattern.md) — MQTTClient is the client actually wired into PanindiganFCA; keep its reconnect/health-check logic in sync with FastMQTT's
+- [Facebook lsd token vs fb_dtsg](facebook-lsd-token.md) — real lsd token must be extracted/reused like fb_dtsg, never faked/omitted, or GraphQL calls get rejected

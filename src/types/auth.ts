@@ -17,6 +17,7 @@ export type CookieFormat = 'c3c-fbstate' | 'fca-unofficial' | 'facebook-chat-api
 export interface AppState {
   cookies: Cookie[];
   fbDtsg?: string;
+  lsd?: string;
   userId?: string;
   token?: string;
   region?: string;
@@ -33,6 +34,7 @@ export interface Credentials {
 export interface Session {
   userId: string;
   fbDtsg: string;
+  lsd: string;
   cookies: Cookie[];
   token?: string;
   region: string;

@@ -339,6 +339,7 @@ export class CookieParser {
         return {
           cookies: this.parse(obj.cookies),
           fbDtsg: obj.fbDtsg as string | undefined,
+          lsd: obj.lsd as string | undefined,
           userId: obj.userId as string | undefined,
           token: obj.token as string | undefined,
           region: obj.region as string | undefined,

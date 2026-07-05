@@ -145,7 +145,7 @@ export class Authenticator {
     const session = await this.sessionManager.createSession(parsedAppState);
     
     // Set auth tokens for GraphQL
-    this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId);
+    this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId, session.lsd);
 
     // Validate by fetching homepage
     try {
@@ -161,9 +161,29 @@ export class Authenticator {
         const fbDtsg = extractFbDtsg(html);
         if (fbDtsg) {
           this.sessionManager.updateFbDtsg(fbDtsg);
-          this.graphqlClient.setAuthTokens(fbDtsg, session.userId);
+          this.graphqlClient.setAuthTokens(fbDtsg, session.userId, this.sessionManager.getLsd() || undefined);
           logger.debug('Extracted fb_dtsg from homepage');
         }
+      }
+
+      // Extract the real lsd token — a separate, page-load-bound Facebook
+      // security token from fb_dtsg. GraphQL/Comet ajax endpoints (e.g.
+      // /chat/user_info/, /webgraphql/query) reject requests missing a
+      // valid lsd with "Please try closing and re-opening your browser
+      // window." It must always come from real HTML, never be generated.
+      if (!session.lsd) {
+        const lsdMatch = html.match(/"lsd":\s*"([a-zA-Z0-9_-]+)"/);
+        const lsd = lsdMatch?.[1];
+        if (lsd) {
+          this.sessionManager.updateLsd(lsd);
+          this.requestHandler.setLsdToken(lsd);
+          this.graphqlClient.setAuthTokens(this.sessionManager.getFbDtsg() || session.fbDtsg, session.userId, lsd);
+          logger.debug('Extracted lsd token from homepage');
+        } else {
+          logger.warn('Could not extract lsd token from homepage; GraphQL requests (e.g. getUserInfo) may be rejected by Facebook until a valid lsd is obtained');
+        }
+      } else {
+        this.requestHandler.setLsdToken(session.lsd);
       }
 
       // Extract iris sequence ID. The general homepage does not always embed
@@ -318,12 +338,14 @@ export class Authenticator {
           path: c.path || '/',
         })),
         fbDtsg: fbDtsg,
+        lsd: lsd,
         userId: cUser.value,
       };
 
       // Create and return session
       const session = await this.sessionManager.createSession(appState);
-      this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId);
+      this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId, session.lsd);
+      this.requestHandler.setLsdToken(session.lsd);
 
       logger.logAuth('login', 'success', `User: ${session.userId}`);
       return session;
@@ -410,7 +432,10 @@ export class Authenticator {
       };
 
       const session = await this.sessionManager.createSession(appState);
-      this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId);
+      this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId, session.lsd);
+      if (session.lsd) {
+        this.requestHandler.setLsdToken(session.lsd);
+      }
 
       logger.logAuth('2fa', 'success', `User: ${session.userId}`);
       return session;
@@ -501,7 +526,10 @@ export class Authenticator {
       };
 
       const session = await this.sessionManager.createSession(appState);
-      this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId);
+      this.graphqlClient.setAuthTokens(session.fbDtsg, session.userId, session.lsd);
+      if (session.lsd) {
+        this.requestHandler.setLsdToken(session.lsd);
+      }
 
       logger.logAuth('checkpoint', 'success', `User: ${session.userId}`);
       return session;

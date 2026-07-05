@@ -5,6 +5,20 @@ All notable changes to the Panindigan project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.8] - 2026-07-05
+
+### Fixed
+
+#### GraphQL (`src/api/GraphQLClient.ts`, `src/auth/Authenticator.ts`, `src/auth/SessionManager.ts`, `src/auth/CookieParser.ts`, `src/api/RequestHandler.ts`, `src/types/auth.ts`)
+- **Root cause of `GraphQLError: Please try closing and re-opening your browser window` on `UserManager.getUserInfo()` and all other GraphQL/Comet-ajax calls** — Facebook's `lsd` security token (a real, page-load-bound token distinct from `fb_dtsg`) was never handled correctly:
+  - `GraphQLClient.query()`/`executeBatch()` sent a **fabricated** `lsd: generateRandomString(12)` instead of a real token extracted from Facebook.
+  - `GraphQLClient.formPost()` (the exact path in the reported stack trace: `formPost → UserManager.getUserInfo`) never sent an `lsd` field at all.
+  - `RequestHandler.setLsdToken()` existed to inject the `x-fb-lsd` header but was **never called anywhere** in the codebase, so that header was always empty.
+  - Facebook validates `lsd` as a real session-binding token; a missing or fabricated value causes it to treat the request as coming from a stale/invalid browser session and reject it with exactly this message.
+  - Fix: `lsd` is now a first-class field on `Session`/`AppState` (`src/types/auth.ts`). It is extracted from real Facebook HTML the same way `fb_dtsg` already was — on AppState login (`Authenticator.loginWithAppState`), credentials login, 2FA, and checkpoint resolution (`Authenticator.ts`), and re-extracted on every periodic session refresh (`SessionManager.refreshSession()`). The real value is pushed into both `RequestHandler.setLsdToken()` (so the `x-fb-lsd` header is sent) and `GraphQLClient.setAuthTokens()` (so `formPost()`'s base params and `query()`/`executeBatch()`'s payload all carry the real token instead of a random string or nothing). `CookieParser.parseAppState()` also now passes through a `lsd` field on object-form AppState input for callers who already capture it themselves.
+  - No retries, delays, or workarounds were added — this is a root-cause fix: the real token is captured and reused everywhere it needs to be, exactly like `fb_dtsg` already was. If a real `lsd` genuinely cannot be extracted from Facebook's HTML (e.g. Facebook changes the page's token embedding format), the library now logs a clear warning instead of silently sending a fabricated value.
+- No MQTT files were touched, and no login behavior changed except adding the additional `lsd` extraction/propagation alongside the existing `fb_dtsg` extraction.
+
 ## [1.2.7] - 2026-07-05
 
 ### Audited

@@ -58,6 +58,7 @@ export class SessionManager {
     this.session = {
       userId: stringUserId,
       fbDtsg: appState.fbDtsg || '',
+      lsd: appState.lsd || '',
       cookies: appState.cookies,
       token: appState.token,
       region: appState.region || 'PRN',
@@ -122,6 +123,29 @@ export class SessionManager {
     }
   }
  
+  /**
+   * Get lsd token
+   */
+  getLsd(): string | null {
+    return this.session?.lsd ?? null;
+  }
+
+  /**
+   * Update lsd token.
+   *
+   * `lsd` is a real, page-load-bound Facebook security token (distinct from
+   * `fb_dtsg`) that Facebook checks on Comet-era ajax/GraphQL endpoints. It
+   * must come from the actual HTML Facebook served for this session — never
+   * randomly generated — or Facebook rejects the request with
+   * "Please try closing and re-opening your browser window."
+   */
+  updateLsd(lsd: string): void {
+    if (this.session) {
+      this.session.lsd = lsd;
+      this.session.lastActive = new Date();
+    }
+  }
+
   /**
    * Update iris sequence ID
    */
@@ -210,6 +234,21 @@ export class SessionManager {
             if (fbDtsgMatch && fbDtsgMatch[1]) {
               this.session.fbDtsg = fbDtsgMatch[1];
               logger.info('Auto-refreshed fb_dtsg token');
+            }
+
+            // Auto-refresh the real lsd token too — it is a separate,
+            // page-load-bound Facebook security token from fb_dtsg, and
+            // GraphQL/Comet ajax requests are rejected with "Please try
+            // closing and re-opening your browser window" when it is stale
+            // or missing. It must be re-pushed into both the RequestHandler
+            // (x-fb-lsd header) and the GraphQLClient (lsd form field).
+            const lsdMatch = html.match(/"lsd":\s*"([a-zA-Z0-9_-]+)"/);
+            if (lsdMatch && lsdMatch[1]) {
+              this.session.lsd = lsdMatch[1];
+              this.requestHandler.setLsdToken(lsdMatch[1]);
+              logger.info('Auto-refreshed lsd token');
+            } else {
+              logger.warn('Could not extract lsd token during session refresh; GraphQL requests may be rejected until the next successful refresh');
             }
  
             // Extract iris sequence ID if available (tries all known response formats).

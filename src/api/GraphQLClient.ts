@@ -23,6 +23,7 @@ export class GraphQLClient {
   private requestHandler: RequestHandler;
   private fbDtsg: string = '';
   private userId: string = '';
+  private lsd: string = '';
   private checkpointGuard?: CheckpointGuard;
 
   constructor(requestHandler: RequestHandler) {
@@ -30,11 +31,22 @@ export class GraphQLClient {
   }
 
   /**
-   * Set authentication tokens
+   * Set authentication tokens.
+   *
+   * `lsd` is optional here for backward compatibility with existing callers
+   * that only pass fbDtsg/userId, but must be provided (the real value
+   * extracted from Facebook's HTML — see Authenticator/SessionManager) for
+   * GraphQL/Comet ajax requests to succeed. Without it, `query()`/
+   * `executeBatch()` used to send a fabricated random string and
+   * `formPost()` sent no `lsd` at all — both of which Facebook rejects with
+   * "Please try closing and re-opening your browser window."
    */
-  setAuthTokens(fbDtsg: string, userId: string): void {
+  setAuthTokens(fbDtsg: string, userId: string, lsd?: string): void {
     this.fbDtsg = fbDtsg;
     this.userId = userId;
+    if (lsd) {
+      this.lsd = lsd;
+    }
   }
 
   /**
@@ -59,6 +71,7 @@ export class GraphQLClient {
   buildBaseParams(): Record<string, string> {
     return {
       fb_dtsg: this.fbDtsg,
+      lsd: this.lsd,
       __a: '1',
       __user: this.userId,
       __req: generateReqParam(),
@@ -144,7 +157,7 @@ export class GraphQLClient {
       __comet_req: '0',
       fb_dtsg: this.fbDtsg,
       jazoest: this.generateJazoest(),
-      lsd: generateRandomString(12),
+      lsd: this.lsd,
       ...formData,
     };
 
@@ -267,7 +280,7 @@ export class GraphQLClient {
       __comet_req: '7',
       fb_dtsg: this.fbDtsg,
       jazoest: this.generateJazoest(),
-      lsd: generateRandomString(12),
+      lsd: this.lsd,
       ...formData,
     };
 
