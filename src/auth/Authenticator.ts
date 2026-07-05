@@ -18,7 +18,7 @@ import { RequestHandler } from '../api/RequestHandler.js';
 import { GraphQLClient } from '../api/GraphQLClient.js';
 import { logger } from '../utils/Logger.js';
 import { FACEBOOK_BASE_URL, FACEBOOK_MESSAGES_URL, DEFAULT_USER_AGENT } from '../utils/Constants.js';
-import { extractFbDtsg, extractIrisSeqId, extractRevisionInfo, retryWithBackoff } from '../utils/Helpers.js';
+import { extractFbDtsg, extractIrisSeqId, extractRevisionInfo, extractRevision, extractLsd, retryWithBackoff } from '../utils/Helpers.js';
 
 export class Authenticator {
   private sessionManager: SessionManager;
@@ -176,19 +176,19 @@ export class Authenticator {
       // /chat/user_info/, /webgraphql/query) reject requests missing a
       // valid lsd with "Please try closing and re-opening your browser
       // window." It must always come from real HTML, never be generated.
-      if (!session.lsd) {
-        const lsdMatch = html.match(/"lsd":\s*"([a-zA-Z0-9_-]+)"/);
-        const lsd = lsdMatch?.[1];
-        if (lsd) {
-          this.sessionManager.updateLsd(lsd);
-          this.requestHandler.setLsdToken(lsd);
-          this.graphqlClient.setAuthTokens(this.sessionManager.getFbDtsg() || session.fbDtsg, session.userId, lsd);
-          logger.debug('Extracted lsd token from homepage');
-        } else {
-          logger.warn('Could not extract lsd token from homepage; GraphQL requests (e.g. getUserInfo) may be rejected by Facebook until a valid lsd is obtained');
-        }
-      } else {
+      //
+      // Facebook embeds lsd as a Haste module bootstrap tuple
+      // (`["LSD",[],{"token":"..."}]`), not a plain `"lsd":"..."` JSON key —
+      // see extractLsd() in Helpers.ts for the full root-cause writeup.
+      let lsd = extractLsd(html);
+      if (session.lsd) {
         this.requestHandler.setLsdToken(session.lsd);
+        lsd = session.lsd;
+      } else if (lsd) {
+        this.sessionManager.updateLsd(lsd);
+        this.requestHandler.setLsdToken(lsd);
+        this.graphqlClient.setAuthTokens(this.sessionManager.getFbDtsg() || session.fbDtsg, session.userId, lsd);
+        logger.debug('Extracted lsd token from homepage');
       }
 
       // Extract the real Facebook build/revision fingerprint
@@ -197,13 +197,24 @@ export class Authenticator {
       // a randomly generated __hsi with the same generic
       // "Please try closing and re-opening your browser window." error —
       // these values must always come from the HTML Facebook just served.
-      const revisionInfo = extractRevisionInfo(html);
+      let revisionInfo = extractRevisionInfo(html);
       if (revisionInfo) {
         this.sessionManager.updateRevisionInfo(revisionInfo);
         this.graphqlClient.setRevisionInfo(revisionInfo);
         logger.debug('Extracted real Facebook build/revision fingerprint', revisionInfo);
-      } else {
-        logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi from homepage; GraphQL query()/batchQuery() will be rejected until a valid fingerprint is obtained (formPost-based calls still work once fb_dtsg/lsd are set)');
+      }
+
+      // Extract the plain numeric page revision (__rev) — a different,
+      // much more commonly-present value than the Comet spin/hsi bundle
+      // above. Real FCA implementations (fca-unofficial, ws3-fca) send this
+      // on every legacy form-encoded request (e.g. /chat/user_info/,
+      // used by getUserInfo) independent of whether the full Comet
+      // fingerprint was ever obtained — this is what actually unblocks
+      // getUserInfo() without needing __spin_r/__spin_b/__spin_t/__hsi.
+      let revision = extractRevision(html);
+      if (revision) {
+        this.graphqlClient.setRevision(revision);
+        logger.debug('Extracted real Facebook page revision (__rev)', { revision });
       }
 
       // Extract iris sequence ID. The general homepage does not always embed
@@ -216,18 +227,24 @@ export class Authenticator {
       if (irisSeqId) {
         this.sessionManager.updateIrisSeqId(irisSeqId);
         logger.debug('Extracted iris sequence ID from homepage', { irisSeqId });
-      } else {
-        // Fall back to the Messenger inbox page, which actually carries the
-        // real Iris sync sequence id in its initial data blob. This lets a
-        // returning session resume its real backlog position via
-        // /messenger_sync_get_diffs instead of always starting a fresh
-        // sync queue. If this also fails, we still don't fabricate a value
-        // — MQTT just creates a fresh queue, which is correct behavior.
-        //
-        // Wrapped in a short retry/backoff (up to 3 attempts) so a single
-        // transient network hiccup doesn't silently skip this lookup — a
-        // non-2xx status is treated as a retryable failure here too, since
-        // it's most commonly a momentary blip rather than a real error.
+      }
+
+      // If lsd, the revision fingerprint, or the iris sequence id are still
+      // missing after the homepage fetch, fall back to the Messenger inbox
+      // page. www.facebook.com/ sometimes serves a stripped-down/cached
+      // shell (CDN edge cache, A/B cohort, consent interstitial, etc.) that
+      // omits the Haste bootstrap blob entirely, while /messages/t/ is a
+      // full Comet page load that reliably re-embeds LSD/__spin_*/__hsi
+      // alongside the Iris sync data. This mirrors how real FCA
+      // implementations (e.g. nkxfca's refreshTokensAlternative) retry
+      // token extraction against a second real endpoint instead of ever
+      // fabricating a value.
+      //
+      // Wrapped in a short retry/backoff (up to 3 attempts) so a single
+      // transient network hiccup doesn't silently skip this lookup — a
+      // non-2xx status is treated as a retryable failure here too, since
+      // it's most commonly a momentary blip rather than a real error.
+      if (!lsd || !revisionInfo || !revision || !irisSeqId) {
         try {
           const messagesHtml = await retryWithBackoff(
             async () => {
@@ -242,16 +259,55 @@ export class Authenticator {
             5000
           );
 
-          irisSeqId = extractIrisSeqId(messagesHtml);
-          if (irisSeqId) {
-            this.sessionManager.updateIrisSeqId(irisSeqId);
-            logger.debug('Extracted iris sequence ID from Messenger inbox page', { irisSeqId });
-          } else {
-            logger.debug('No iris sequence ID in Messenger inbox response either; MQTT will start a fresh sync queue');
+          if (!lsd) {
+            lsd = extractLsd(messagesHtml);
+            if (lsd) {
+              this.sessionManager.updateLsd(lsd);
+              this.requestHandler.setLsdToken(lsd);
+              this.graphqlClient.setAuthTokens(this.sessionManager.getFbDtsg() || session.fbDtsg, session.userId, lsd);
+              logger.debug('Extracted lsd token from Messenger inbox page');
+            }
+          }
+
+          if (!revisionInfo) {
+            revisionInfo = extractRevisionInfo(messagesHtml);
+            if (revisionInfo) {
+              this.sessionManager.updateRevisionInfo(revisionInfo);
+              this.graphqlClient.setRevisionInfo(revisionInfo);
+              logger.debug('Extracted real Facebook build/revision fingerprint from Messenger inbox page', revisionInfo);
+            }
+          }
+
+          if (!revision) {
+            revision = extractRevision(messagesHtml);
+            if (revision) {
+              this.graphqlClient.setRevision(revision);
+              logger.debug('Extracted real Facebook page revision (__rev) from Messenger inbox page', { revision });
+            }
+          }
+
+          if (!irisSeqId) {
+            irisSeqId = extractIrisSeqId(messagesHtml);
+            if (irisSeqId) {
+              this.sessionManager.updateIrisSeqId(irisSeqId);
+              logger.debug('Extracted iris sequence ID from Messenger inbox page', { irisSeqId });
+            } else {
+              logger.debug('No iris sequence ID in Messenger inbox response either; MQTT will start a fresh sync queue');
+            }
           }
         } catch (inboxError) {
-          logger.debug('Messenger inbox fallback for iris sequence ID failed after retries; MQTT will start a fresh sync queue', inboxError);
+          logger.debug('Messenger inbox fallback for lsd/revision fingerprint/iris sequence ID failed after retries', inboxError);
         }
+      }
+
+      if (!lsd) {
+        logger.warn('Could not extract lsd token from homepage or Messenger inbox; GraphQL requests (e.g. getUserInfo) may be rejected by Facebook until a valid lsd is obtained');
+      }
+      if (!revisionInfo) {
+        logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi from homepage or Messenger inbox; GraphQL query()/batchQuery() will be rejected until a valid fingerprint is obtained (formPost-based calls still work once fb_dtsg/lsd are set)');
+      }
+      if (!revision) {
+        logger.warn('Could not extract real page revision (__rev) from homepage or Messenger inbox; legacy form-encoded calls (e.g. getUserInfo) will omit __rev until a valid value is obtained');
       }
 
     } catch (error) {
@@ -281,10 +337,13 @@ export class Authenticator {
       const loginPageResponse = await this.requestHandler.get(FACEBOOK_BASE_URL);
       const loginPageHtml = await loginPageResponse.text();
 
-      // Extract necessary tokens from login page
+      // Extract necessary tokens from login page.
+      // lsd is embedded as a Haste module bootstrap tuple
+      // (`["LSD",[],{"token":"..."}]`), not a plain `"lsd":"..."` JSON key —
+      // see extractLsd() in Helpers.ts for the full root-cause writeup.
       const fbDtsg = extractFbDtsg(loginPageHtml);
-      const lsd = loginPageHtml.match(/"lsd":\"([a-zA-Z0-9_-]+)\"/)?.[1];
-      
+      const lsd = extractLsd(loginPageHtml) ?? undefined;
+
       if (!fbDtsg || !lsd) {
         throw new Error('Could not extract login tokens from page');
       }

@@ -8,7 +8,7 @@ import { CookieJar } from 'tough-cookie';
 import type { Session, AppState, SessionValidationResult } from '../types/index.js';
 import { CookieParser } from './CookieParser.js';
 import { logger } from '../utils/Logger.js';
-import { generateDeviceId, generateUUID, extractIrisSeqId, extractRevisionInfo } from '../utils/Helpers.js';
+import { generateDeviceId, generateUUID, extractIrisSeqId, extractRevisionInfo, extractRevision, extractLsd } from '../utils/Helpers.js';
 import { SESSION_SETTINGS, FACEBOOK_BASE_URL } from '../utils/Constants.js';
 import type { RequestHandler } from '../api/RequestHandler.js';
 import type { GraphQLClient } from '../api/GraphQLClient.js';
@@ -273,10 +273,14 @@ export class SessionManager {
             // closing and re-opening your browser window" when it is stale
             // or missing. It must be re-pushed into both the RequestHandler
             // (x-fb-lsd header) and the GraphQLClient (lsd form field).
-            const lsdMatch = html.match(/"lsd":\s*"([a-zA-Z0-9_-]+)"/);
-            if (lsdMatch && lsdMatch[1]) {
-              this.session.lsd = lsdMatch[1];
-              this.requestHandler.setLsdToken(lsdMatch[1]);
+            //
+            // Facebook embeds lsd as a Haste module bootstrap tuple
+            // (`["LSD",[],{"token":"..."}]`), not a plain `"lsd":"..."` JSON
+            // key — see extractLsd() in Helpers.ts for the full root cause.
+            const lsd = extractLsd(html);
+            if (lsd) {
+              this.session.lsd = lsd;
+              this.requestHandler.setLsdToken(lsd);
               logger.info('Auto-refreshed lsd token');
             } else {
               logger.warn('Could not extract lsd token during session refresh; GraphQL requests may be rejected until the next successful refresh');
@@ -295,6 +299,17 @@ export class SessionManager {
               logger.warn('Could not extract __spin_r/__spin_b/__spin_t/__hsi during session refresh; GraphQL query()/batchQuery() may be rejected until the next successful refresh');
             }
 
+            // Auto-refresh the plain numeric page revision (__rev) — a
+            // different, much more commonly-present value than the Comet
+            // spin/hsi bundle above. Real FCA implementations
+            // (fca-unofficial, ws3-fca) send this on every legacy
+            // form-encoded request (e.g. /chat/user_info/, used by
+            // getUserInfo) independent of the Comet fingerprint.
+            const revision = extractRevision(html);
+            if (revision) {
+              logger.info('Auto-refreshed real Facebook page revision (__rev)');
+            }
+
             // Push all refreshed tokens back into the live GraphQLClient —
             // without this, the Session object updates but every in-flight
             // manager keeps issuing requests with the old (soon-to-expire)
@@ -303,6 +318,9 @@ export class SessionManager {
               this.graphqlClient.setAuthTokens(this.session.fbDtsg, this.session.userId, this.session.lsd);
               if (revisionInfo) {
                 this.graphqlClient.setRevisionInfo(revisionInfo);
+              }
+              if (revision) {
+                this.graphqlClient.setRevision(revision);
               }
             }
  

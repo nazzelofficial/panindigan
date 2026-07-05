@@ -40,8 +40,30 @@ export class GraphQLClient {
   private spinT: string = '';
   private hsi: string = '';
 
+  /**
+   * Facebook's simple numeric page revision (`__rev`), extracted via
+   * `extractRevision()` (a plain `'revision":'` match). This is a
+   * different, much more commonly-available value than the Comet
+   * `__spin_r`/`__spin_b`/`__spin_t`/`__hsi` bundle above. Real FCA
+   * implementations (fca-unofficial, ws3-fca) send this on every
+   * legacy form-encoded request (e.g. `/chat/user_info/`) independent of
+   * whether the full Comet fingerprint was ever obtained — see
+   * buildBaseParams(). Never fabricated; stays empty until real HTML
+   * supplies it.
+   */
+  private revision: string = '';
+
   constructor(requestHandler: RequestHandler) {
     this.requestHandler = requestHandler;
+  }
+
+  /**
+   * Set the real, plain numeric Facebook page revision extracted via
+   * extractRevision(). Independent from setRevisionInfo()'s Comet
+   * spin/hsi bundle — see field docs on `revision`.
+   */
+  setRevision(revision: string): void {
+    this.revision = revision;
   }
 
   /**
@@ -101,22 +123,43 @@ export class GraphQLClient {
   buildBaseParams(): Record<string, string> {
     const params: Record<string, string> = {
       fb_dtsg: this.fbDtsg,
-      lsd: this.lsd,
       __a: '1',
       __user: this.userId,
       __req: generateReqParam(),
       jazoest: this.generateJazoest(),
     };
 
-    // Only attach the real build/revision fingerprint once it has actually
-    // been extracted from live HTML (see setRevisionInfo docs) — never a
-    // fabricated placeholder.
+    // `lsd` is only attached once a real value has been extracted. Real FCA
+    // implementations (fca-unofficial, ws3-fca) never send an empty/absent
+    // lsd on legacy form endpoints — an explicit empty-string value is not
+    // the same as "field omitted" and some Facebook endpoints reject a
+    // present-but-empty token the same way they reject a fabricated one.
+    if (this.lsd) {
+      params.lsd = this.lsd;
+    }
+
+    // `__rev` uses the plain numeric page revision (extractRevision(),
+    // matching fca-unofficial/ws3-fca's `makeDefaults()`), independent of
+    // whether the full Comet spin/hsi fingerprint below was ever obtained.
+    // This is why formPost()-based calls like getUserInfo (/chat/user_info/)
+    // no longer depend on __spin_r/__spin_b/__spin_t/__hsi at all — real
+    // libraries never require that bundle for these legacy endpoints.
+    if (this.revision) {
+      params.__rev = this.revision;
+    }
+
+    // Only attach the full Comet build/revision fingerprint once it has
+    // actually been extracted from live HTML (see setRevisionInfo docs) —
+    // never a fabricated placeholder. Used by the full webgraphql
+    // query()/executeBatch() calls below, not by formPost().
     if (this.hasRevisionInfo()) {
-      params.__rev = this.spinR;
       params.__spin_r = this.spinR;
       params.__spin_b = this.spinB;
       params.__spin_t = this.spinT;
       params.__hsi = this.hsi;
+      if (!params.__rev) {
+        params.__rev = this.spinR;
+      }
     }
 
     return params;
@@ -183,8 +226,6 @@ export class GraphQLClient {
     variables: Record<string, unknown> = {},
     queryDoc?: string
   ): Promise<T> {
-    const formData = this.buildFormData();
-
     if (!this.hasRevisionInfo()) {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
@@ -194,13 +235,16 @@ export class GraphQLClient {
       );
     }
 
+    // Built from buildBaseParams()/buildFormData() first, then Comet-specific
+    // fields override on top — never the other way around, so a stale
+    // fabricated placeholder (there is none anymore, but this ordering is
+    // what prevents that class of bug) can't silently clobber a real
+    // extracted value like __spin_r.
     const payload: Record<string, string> = {
+      ...this.buildFormData(),
       av: this.userId,
       __user: this.userId,
-      __a: '1',
       __req: generateReqParam(),
-      dpr: '1',
-      __ccg: 'EXCELLENT',
       __rev: this.spinR,
       __spin_r: this.spinR,
       __spin_b: this.spinB,
@@ -213,7 +257,6 @@ export class GraphQLClient {
       fb_dtsg: this.fbDtsg,
       jazoest: this.generateJazoest(),
       lsd: this.lsd,
-      ...formData,
     };
 
     // Add the query (key is always q0 for a single-query call)
@@ -318,8 +361,6 @@ export class GraphQLClient {
    * Execute a single batch query
    */
   private async executeBatch(batch: BatchRequest): Promise<BatchResponse> {
-    const formData = this.buildFormData();
-
     if (!this.hasRevisionInfo()) {
       throw this.createGraphQLError(
         ERROR_CODES.GRAPHQL_ERROR,
@@ -329,13 +370,13 @@ export class GraphQLClient {
       );
     }
 
+    // See query()'s payload construction comment — buildFormData() spreads
+    // first so Comet-specific fields always win, never get clobbered.
     const payload: Record<string, string> = {
+      ...this.buildFormData(),
       av: this.userId,
       __user: this.userId,
-      __a: '1',
       __req: generateReqParam(),
-      dpr: '1',
-      __ccg: 'EXCELLENT',
       __rev: this.spinR,
       __spin_r: this.spinR,
       __spin_b: this.spinB,
@@ -348,7 +389,6 @@ export class GraphQLClient {
       fb_dtsg: this.fbDtsg,
       jazoest: this.generateJazoest(),
       lsd: this.lsd,
-      ...formData,
     };
 
     // Add batch queries with optimized indexing
@@ -446,13 +486,23 @@ export class GraphQLClient {
    * Build base form data
    */
   private buildFormData(): Partial<FacebookFormData> {
-    return {
+    const data: Partial<FacebookFormData> = {
       __a: '1',
       __req: generateReqParam(),
       dpr: '1',
       __ccg: 'EXCELLENT',
-      __rev: '100',
     };
+
+    // Real __rev (extractRevision()), never a fabricated placeholder like
+    // the old static "100" — see GraphQLClient.revision field docs. Only
+    // set here as a base default; query()/executeBatch() override it with
+    // the Comet __spin_r fingerprint when available (see payload ordering
+    // in those methods).
+    if (this.revision) {
+      data.__rev = this.revision;
+    }
+
+    return data;
   }
 
   /**

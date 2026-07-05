@@ -124,6 +124,43 @@ export function extractFbDtsg(html: string): string | null {
 }
 
 /**
+ * Extract the real `lsd` (Low-latency Server Data / "Load Secure Data")
+ * security token from live Facebook page HTML.
+ *
+ * ROOT CAUSE of "Could not extract lsd token from homepage": Facebook does
+ * NOT embed lsd as a plain JSON key (`"lsd":"XXXX"`) anywhere in the page.
+ * It is delivered as a Relay/Haste module bootstrap call in the form:
+ *
+ *   ["LSD",[],{"token":"XXXXXXXXXXXXXXXXXXXXXX"},123]
+ *
+ * i.e. a `require`/`define`-style tuple whose first element is the literal
+ * module name `"LSD"`, not a `lsd` object key. This is confirmed by
+ * production Facebook Messenger client libraries (e.g. nkxfca's
+ * buildAPI.js / tokenRefresh.js) which extract it via
+ * `"LSD",[],{"token":"..."}`, never via `"lsd":"..."`. The previous
+ * `/"lsd":\s*"([a-zA-Z0-9_-]+)"/` regex could never match real Facebook
+ * HTML, which is why extraction always failed regardless of homepage
+ * fetch success. A legacy `name="lsd" value="..."` hidden form field
+ * pattern (used on some legacy/mbasic-style pages) is kept as a secondary
+ * fallback, never a fabricated value.
+ */
+export function extractLsd(html: string): string | null {
+  const patterns = [
+    /"LSD",\[\],\{"token":"([^"]+)"/,
+    /name="lsd" value="([^"]+)"/,
+    /"lsd":\s*"([a-zA-Z0-9_-]+)"/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+/**
  * Extract user ID from HTML or cookies
  */
 export function extractUserId(html: string): string | null {
@@ -176,6 +213,25 @@ export function extractRevisionInfo(html: string): {
     spinT: spinTMatch[1],
     hsi: hsiMatch[1],
   };
+}
+
+/**
+ * Extract Facebook's simple numeric page revision (`__rev`) from live HTML.
+ *
+ * This is a DIFFERENT, much more commonly-present value than the Comet
+ * `__spin_r`/`__spin_b`/`__spin_t`/`__hsi` fingerprint bundle extracted by
+ * `extractRevisionInfo()`. Real, currently-maintained FCA implementations
+ * (`dongp06/fca-unofficial`'s and `VangBanLaNhat/ws3-fca`'s `utils.js`
+ * `makeDefaults()`) derive `__rev` independently via a plain
+ * `'revision":'` match and send it on every legacy form-encoded request
+ * (e.g. `/chat/user_info/`) — they never gate it behind the full Comet
+ * spin/hsi bundle, and they never fabricate a static placeholder like
+ * `"100"` when it's missing. Returns null (never a fake value) if the
+ * page doesn't carry it.
+ */
+export function extractRevision(html: string): string | null {
+  const match = html.match(/revision":(\d+)/);
+  return match && match[1] ? match[1] : null;
 }
 
 /**
