@@ -1,3 +1,31 @@
+# ⚠️ Deprecated
+
+> **This package is deprecated and is no longer under active development.**
+
+A new and actively maintained successor is now available:
+
+## 👉 Please migrate to **panindigan-fca**
+
+`panindigan-fca` is a complete rewrite with a modern architecture, improved reliability, and long-term support.
+
+### Why migrate?
+
+* 🚀 Modern TypeScript-first architecture
+* 💾 Automatic session persistence
+* 🗄️ SQLite / LibSQL / Turso session storage
+* 👥 Native multi-account support
+* 🔄 Event-driven session lifecycle
+* 🌐 Built-in HTTP, HTTPS, SOCKS4, and SOCKS5 proxy support
+* 🔁 Automatic session refresh and recovery
+* ⚡ Better performance, stability, and maintainability
+* 📦 Designed for modern Node.js versions
+
+> **All new features, improvements, and bug fixes will only be added to `panindigan-fca`.**
+
+This package will remain available for existing projects, but it will only receive critical fixes if necessary.
+
+Thank you to everyone who has supported this project. ❤️
+
 # Panindigan
 
 <p align="center">
