@@ -1,30 +1,44 @@
-# ⚠️ Deprecated
+#⚠️ Deprecated
 
-> **This package is deprecated and is no longer under active development.**
+This package is deprecated and is no longer under active development.
 
 A new and actively maintained successor is now available:
 
-## 👉 Please migrate to **panindigan-fca**
+👉 Please migrate to panindigan-fca
 
-`panindigan-fca` is a complete rewrite with a modern architecture, improved reliability, and long-term support.
+panindigan-fca is a complete rewrite built with a modern architecture, improved reliability, and long-term maintainability.
 
-### Why migrate?
+Why migrate?
+🚀 Modern TypeScript-first architecture
+💾 Automatic session persistence
+🗄️ SQLite / LibSQL / Turso session storage
+👥 Native multi-account support
+🔄 Event-driven session lifecycle
+🌐 Built-in HTTP, HTTPS, SOCKS4, and SOCKS5 proxy support
+🔁 Automatic session refresh and recovery
+⚡ Better performance, stability, and maintainability
+📦 Designed for modern Node.js versions
+🛠️ New features and continuous improvements
+Maintenance Status
 
-* 🚀 Modern TypeScript-first architecture
-* 💾 Automatic session persistence
-* 🗄️ SQLite / LibSQL / Turso session storage
-* 👥 Native multi-account support
-* 🔄 Event-driven session lifecycle
-* 🌐 Built-in HTTP, HTTPS, SOCKS4, and SOCKS5 proxy support
-* 🔁 Automatic session refresh and recovery
-* ⚡ Better performance, stability, and maintainability
-* 📦 Designed for modern Node.js versions
+As a solo maintainer, I have decided to focus all future development on panindigan-fca.
 
-> **All new features, improvements, and bug fixes will only be added to `panindigan-fca`.**
+Because of this:
 
-This package will remain available for existing projects, but it will only receive critical fixes if necessary.
+❌ This package is no longer actively maintained.
+❌ No new features will be added.
+❌ No architectural improvements or major refactors will be made.
+❌ Compatibility with future platform changes is not guaranteed.
+❌ Feature requests and enhancement requests will no longer be accepted.
+❌ Regular maintenance and updates have been discontinued.
 
-Thank you to everyone who has supported this project. ❤️
+Critical bug fixes may be provided at my discretion, but there are no guarantees of future updates or support.
+
+For the best experience, improved stability, better performance, and all future development, please migrate to panindigan-fca.
+
+All future features, improvements, optimizations, and long-term support are exclusively available in panindigan-fca.
+
+Thank you to everyone who has used and supported this project over the years. Your support made this project possible, and I truly appreciate it. ❤️
 
 # Panindigan
 
